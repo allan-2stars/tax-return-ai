@@ -6,7 +6,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db
-from app.db.auth_deps import get_current_user
+from app.db.auth_deps import get_current_user, get_current_unlocked_user
 from app.services.auth.service import resolve_session
 from app.db.workspace_scope import get_or_create_workspace_session, get_workspace_for_user, touch_workspace_opened
 from app.models.document import Document
@@ -164,7 +164,7 @@ async def create_workspace(
 async def list_workspace_documents(
     workspace_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     session = await get_or_create_workspace_session(db, workspace)
@@ -185,7 +185,7 @@ async def upload_workspace_document(
     category: str | None = Form(default=None),
     financial_year: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     # Reuse existing upload behavior and OCR/classification pipeline unchanged.
     from app.routers.documents import upload_document
@@ -217,7 +217,7 @@ async def list_workspace_items(
     review_status: str | None = Query(default=None),
     request: Request = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     if review_status and review_status not in VALID_REVIEW_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid review_status filter")
@@ -260,7 +260,7 @@ async def set_workspace_item_review_status(
     payload: WorkspaceReviewStatusUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     if payload.review_status not in {"needs_review", "confirmed", "excluded", "tax_agent_review"}:
         raise HTTPException(status_code=400, detail="Invalid review_status")
@@ -321,7 +321,7 @@ async def list_workspace_document_pages(
     document_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     session = await get_or_create_workspace_session(db, workspace)
@@ -363,7 +363,7 @@ async def list_workspace_document_pages(
 async def workspace_review_summary(
     workspace_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     session = await get_or_create_workspace_session(db, workspace)
@@ -402,7 +402,7 @@ async def workspace_review_summary(
 async def list_workspace_issues(
     workspace_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     session = await get_or_create_workspace_session(db, workspace)
@@ -429,7 +429,7 @@ async def generate_workspace_encrypted_review_pack(
     payload: WorkspaceExportGenerateRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     pw_error = validate_export_password(payload.export_password)
     if pw_error:
@@ -494,7 +494,7 @@ async def generate_workspace_encrypted_review_pack(
 async def list_workspace_review_pack_history(
     workspace_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     await touch_workspace_opened(workspace)
@@ -511,7 +511,7 @@ async def download_workspace_review_pack(
     workspace_id: str,
     export_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     await touch_workspace_opened(workspace)
@@ -553,7 +553,7 @@ async def delete_workspace_review_pack(
     workspace_id: str,
     export_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     await touch_workspace_opened(workspace)
@@ -593,7 +593,7 @@ async def cleanup_workspace_review_pack_files(
     older_than_days: int | None = Query(default=None, ge=0, le=3650),
     include_ready_exports: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     await get_workspace_for_user(db, current_user, workspace_id)
     result = await cleanup_deleted_review_packs(
@@ -627,7 +627,7 @@ async def list_workspace_audit_events(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_unlocked_user),
 ):
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     session = await get_or_create_workspace_session(db, workspace)

@@ -10,7 +10,9 @@ vi.mock('@/lib/api', () => ({
     authSession: vi.fn(),
     authSetup: vi.fn(),
     authUnlock: vi.fn(),
+    authRecoverReset: vi.fn(),
     authLogout: vi.fn(),
+    authLogoutKeepalive: vi.fn(),
     listWorkspaces: vi.fn(),
     getWorkspaceReviewSummary: vi.fn(),
     listWorkspaceItems: vi.fn(),
@@ -28,6 +30,7 @@ const apiMock = vi.mocked(api);
 describe('WorkspaceApp API-backed states', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMock.authLogout.mockResolvedValue({ ok: true });
     apiMock.listWorkspaceReviewPacks.mockResolvedValue([]);
     apiMock.listWorkspaceAuditEvents.mockResolvedValue([]);
     apiMock.workspaceReviewPackDownloadUrl.mockImplementation((workspaceId: string, exportId: string) => `/api/workspaces/${workspaceId}/review-pack/${exportId}/download`);
@@ -283,6 +286,20 @@ describe('WorkspaceApp API-backed states', () => {
     expect(await screen.findByText('Workspace is locked. Unlock to view sensitive tax data.')).toBeInTheDocument();
   });
 
+  it('handles 401 sensitive errors with lock message', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockRejectedValue(new Error('API error 401'));
+    render(<WorkspaceApp />);
+    expect(await screen.findByText('Workspace is locked. Unlock to view sensitive tax data.')).toBeInTheDocument();
+  });
+
   it('shows locked message when review status update is attempted while locked', async () => {
     apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
     apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
@@ -315,5 +332,21 @@ describe('WorkspaceApp API-backed states', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Review Items' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
     expect(await screen.findByText('Workspace is locked. Unlock to view sensitive tax data.')).toBeInTheDocument();
+  });
+
+  it('locks workspace when lock button is clicked', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lock Workspace' }));
+    expect(apiMock.authLogout).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText('Unlock Workspace')).toBeInTheDocument();
   });
 });

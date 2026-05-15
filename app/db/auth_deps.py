@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.deps import get_db
 from app.models.user import User
 from app.services.auth.service import resolve_session, COOKIE_NAME
+from app.services.security.key_cache import get_session_key
 
 
 def _extract_token(request: Request) -> str | None:
@@ -34,4 +35,17 @@ async def get_optional_user(
 ) -> User | None:
     token = _extract_token(request)
     user, _session = await resolve_session(db, token)
+    return user
+
+
+async def get_current_unlocked_user(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    token = _extract_token(request)
+    user, _session = await resolve_session(db, token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not get_session_key(token):
+        raise HTTPException(status_code=423, detail="Workspace is locked. Unlock to view sensitive tax data.")
     return user

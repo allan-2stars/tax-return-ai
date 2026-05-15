@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db
+from app.config import settings
 from app.db.auth_deps import get_optional_user
 from app.schemas.auth import (
     SetupRequest,
@@ -23,6 +24,46 @@ from app.services.auth.service import (
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+def _cookie_samesite() -> str:
+    value = (settings.cookie_samesite or "lax").lower()
+    if value not in {"lax", "strict", "none"}:
+        return "lax"
+    return value
+
+
+def _cookie_secure() -> bool:
+    if settings.cookie_secure:
+        return True
+    # insecure cookies are allowed only when explicitly enabled for local dev
+    if settings.allow_insecure_cookie_local_dev:
+        return False
+    return True
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite=_cookie_samesite(),
+        domain=settings.cookie_domain or None,
+        max_age=settings.effective_session_absolute_timeout_seconds,
+        path="/",
+    )
+
+
+def _clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        domain=settings.cookie_domain or None,
+        secure=_cookie_secure(),
+        samesite=_cookie_samesite(),
+        httponly=True,
+    )
 
 
 @router.get("/setup-status", response_model=SetupStatusResponse)
@@ -54,15 +95,7 @@ async def setup_auth(
         await db.rollback()
         raise HTTPException(status_code=409, detail=str(exc))
 
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=60 * 60 * 12,
-        path="/",
-    )
+    _set_auth_cookie(response, token)
     return SetupResponse(recovery_key=recovery_key, app_state="UNLOCKED", session_token=token)
 
 
@@ -83,15 +116,7 @@ async def unlock_auth(
         await db.rollback()
         raise HTTPException(status_code=401, detail=str(exc))
 
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=60 * 60 * 12,
-        path="/",
-    )
+    _set_auth_cookie(response, token)
     return {
         "app_state": "UNLOCKED",
         "session_token": token,
@@ -123,15 +148,7 @@ async def recover_reset_auth(
         await db.rollback()
         raise HTTPException(status_code=401, detail=str(exc))
 
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=60 * 60 * 12,
-        path="/",
-    )
+    _set_auth_cookie(response, token)
     return {
         "app_state": "UNLOCKED",
         "session_token": token,
@@ -154,7 +171,7 @@ async def logout_auth(
 
     await revoke_session(db, token)
     await db.commit()
-    response.delete_cookie(COOKIE_NAME, path="/")
+    _clear_auth_cookie(response)
     return {"ok": True}
 
 

@@ -11,10 +11,28 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.ai.providers.mock import MockProvider
+from app.config import settings
 from app.db.base import Base
 from app.db.deps import get_db
 from app.ocr.providers.mock import MockOCRProvider
 from app.routers import auth, workspaces, legacy
+
+
+@pytest.fixture(autouse=True)
+def test_cookie_defaults():
+    """Keep test client cookies usable over http://test transport."""
+    old_secure = settings.cookie_secure
+    old_allow_insecure = settings.allow_insecure_cookie_local_dev
+    old_samesite = settings.cookie_samesite
+    settings.cookie_secure = False
+    settings.allow_insecure_cookie_local_dev = True
+    settings.cookie_samesite = "lax"
+    try:
+        yield
+    finally:
+        settings.cookie_secure = old_secure
+        settings.allow_insecure_cookie_local_dev = old_allow_insecure
+        settings.cookie_samesite = old_samesite
 
 
 @pytest_asyncio.fixture

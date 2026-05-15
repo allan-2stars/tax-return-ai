@@ -18,6 +18,12 @@ type StepStatus = "todo" | "in_progress" | "ready" | "blocked";
 type ReviewFilter = "all" | "needs_review" | "confirmed" | "excluded" | "tax_agent_review";
 
 const NAV_ITEMS: NavItem[] = ["Dashboard", "Documents", "Review Items", "Issues", "Review Pack", "Settings"];
+const AUTH_EVENT_KEY = "taxai_auth_event";
+const LOCK_MESSAGE = "Workspace is locked. Unlock to view sensitive tax data.";
+
+function isLockedResponseError(err: unknown): boolean {
+  return err instanceof Error && (err.message.includes("API error 401") || err.message.includes("API error 423"));
+}
 
 export function WorkspaceApp() {
   const [authState, setAuthState] = useState<AppAuthState>("UNLOCKING");
@@ -66,6 +72,44 @@ export function WorkspaceApp() {
   }, []);
 
   useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== AUTH_EVENT_KEY || !event.newValue) return;
+      if (event.newValue === "locked") setAuthState("LOCKED");
+      if (event.newValue === "expired") setAuthState("SESSION_EXPIRED");
+      if (event.newValue === "unlocked") setAuthState("UNLOCKED");
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  useEffect(() => {
+    if (authState !== "UNLOCKED") return;
+    const interval = window.setInterval(async () => {
+      try {
+        const session = await api.authSession();
+        if (!session.is_authenticated) {
+          const next = session.app_state === "SESSION_EXPIRED" ? "SESSION_EXPIRED" : "LOCKED";
+          setAuthState(next);
+          localStorage.setItem(AUTH_EVENT_KEY, next === "SESSION_EXPIRED" ? "expired" : "locked");
+        }
+      } catch {
+        setAuthState("LOCKED");
+        localStorage.setItem(AUTH_EVENT_KEY, "locked");
+      }
+    }, 60000);
+    return () => window.clearInterval(interval);
+  }, [authState]);
+
+  useEffect(() => {
+    if (!process.env.NEXT_PUBLIC_LOCK_ON_BROWSER_CLOSE || authState !== "UNLOCKED") return;
+    const onBeforeUnload = () => {
+      void api.authLogoutKeepalive();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [authState]);
+
+  useEffect(() => {
     if (authState !== "UNLOCKED") return;
     void (async () => {
       try {
@@ -74,6 +118,10 @@ export function WorkspaceApp() {
         if (list.length > 0) setSelectedWorkspaceId(list[0].id);
       } catch {
         setMessage("Unable to load workspaces.");
+        if (authState === "UNLOCKED") {
+          setAuthState("LOCKED");
+          localStorage.setItem(AUTH_EVENT_KEY, "locked");
+        }
       }
     })();
   }, [authState]);
@@ -114,7 +162,7 @@ export function WorkspaceApp() {
         setMessage(null);
       } catch {
         setReviewItems([]);
-        setMessage("Workspace is locked. Unlock to view sensitive tax data.");
+        setMessage(LOCK_MESSAGE);
       }
     })();
   }, [authState, selectedWorkspaceId, reviewFilter]);
@@ -164,8 +212,12 @@ export function WorkspaceApp() {
       setReviewSummary(summary);
       setReviewItems(items);
       setMessage(null);
-    } catch {
-      setMessage("Workspace is locked. Unlock to view sensitive tax data.");
+    } catch (err) {
+      if (isLockedResponseError(err)) {
+        setAuthState("LOCKED");
+        localStorage.setItem(AUTH_EVENT_KEY, "locked");
+      }
+      setMessage(LOCK_MESSAGE);
     }
   };
 
@@ -259,6 +311,7 @@ export function WorkspaceApp() {
                 if (session.is_authenticated || session.app_state === "UNLOCKED") {
                   setMessage(null);
                   setAuthState("UNLOCKED");
+                  localStorage.setItem(AUTH_EVENT_KEY, "unlocked");
                 } else {
                   setAuthState("LOCKED");
                   setMessage("Invalid password.");
@@ -295,6 +348,7 @@ export function WorkspaceApp() {
                 if (session.is_authenticated || session.app_state === "UNLOCKED") {
                   setMessage(null);
                   setAuthState("UNLOCKED");
+                  localStorage.setItem(AUTH_EVENT_KEY, "unlocked");
                 }
               } catch {
                 setMessage("Recovery reset failed. Check recovery key.");
@@ -356,6 +410,16 @@ export function WorkspaceApp() {
             </button>
           ))}
         </nav>
+        <button
+          className="mt-4 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+          onClick={async () => {
+            await api.authLogout();
+            setAuthState("LOCKED");
+            localStorage.setItem(AUTH_EVENT_KEY, "locked");
+          }}
+        >
+          Lock Workspace
+        </button>
       </aside>
 
       <section className="col-span-12 rounded-xl border border-slate-200 bg-white p-5 md:col-span-6">

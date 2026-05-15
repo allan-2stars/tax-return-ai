@@ -62,3 +62,17 @@ def clear_session_key(token: str | None) -> None:
     if not token:
         return
     _SESSION_KEYS.pop(_token_hash(token), None)
+
+
+def clear_session_key_by_hash(token_hash: str | None) -> None:
+    if not token_hash:
+        return
+    _SESSION_KEYS.pop(token_hash, None)
+
+
+def clear_user_keys(user_id: str | None) -> None:
+    if not user_id:
+        return
+    for token_hash, (row_user, _key, _expires_at) in list(_SESSION_KEYS.items()):
+        if row_user == user_id:
+            _SESSION_KEYS.pop(token_hash, None)

@@ -9,13 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Request
 
+from app.config import settings
 from app.models.user import User
 from app.models.auth_session import AuthSession
 from app.models.tax_workspace import TaxWorkspace
-from app.services.security.key_cache import cache_session_key, clear_session_key
+from app.services.audit.writer import write_audit
+from app.services.security.key_cache import cache_session_key, clear_session_key, clear_session_key_by_hash, clear_user_keys
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-SESSION_TTL_HOURS = 12
 COOKIE_NAME = "taxai_session"
 
 
@@ -176,6 +177,7 @@ async def setup_user(
 
     token, expires_at = await create_session(db, user.id, request)
     cache_session_key(token, user.id, dek, expires_at)
+    await write_audit(db, "user", user.id, "workspace_unlocked", details={"reason": "initial_setup"})
     return user, recovery_key, token, expires_at
 
 
@@ -220,6 +222,7 @@ async def verify_unlock(db: AsyncSession, master_password: str, request: Request
         user.dek_wrapping_metadata = json.dumps({"scheme": "password_only_bootstrap"}, separators=(",", ":"))
         user.dek_created_at = user.dek_created_at or datetime.now(timezone.utc)
     cache_session_key(token, user.id, dek, expires_at)
+    await write_audit(db, "user", user.id, "workspace_unlocked", details={"reason": "manual_unlock"})
     await db.flush()
     return user, token, expires_at
 
@@ -253,9 +256,17 @@ async def recovery_reset_password(
     user.encrypted_dek_by_password = _wrap_dek(dek, new_password_kek, "password_kek_v1")
     user.dek_rotated_at = datetime.now(timezone.utc)
     user.last_unlocked_at = datetime.now(timezone.utc)
+    revoke_result = await db.execute(
+        select(AuthSession).where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+    )
+    for row in revoke_result.scalars().all():
+        row.revoked_at = datetime.now(timezone.utc)
+    clear_user_keys(user.id)
 
     token, expires_at = await create_session(db, user.id, request)
     cache_session_key(token, user.id, dek, expires_at)
+    await write_audit(db, "user", user.id, "recovery_reset_completed")
+    await write_audit(db, "user", user.id, "workspace_unlocked", details={"reason": "recovery_reset"})
     await db.flush()
     return user, token, expires_at
 
@@ -264,7 +275,7 @@ async def create_session(db: AsyncSession, user_id: str, request: Request) -> tu
     token = secrets.token_urlsafe(48)
     token_hash = _sha256_hex(token)
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(hours=SESSION_TTL_HOURS)
+    expires_at = now + timedelta(seconds=settings.effective_session_absolute_timeout_seconds)
 
     client_ip = request.client.host if request.client else ""
     ip_hash = _sha256_hex(client_ip) if client_ip else None
@@ -292,11 +303,46 @@ async def resolve_session(db: AsyncSession, token: str | None) -> tuple[User | N
     result = await db.execute(select(AuthSession).where(AuthSession.session_token_hash == token_hash))
     auth_session = result.scalar_one_or_none()
     if not auth_session:
+        await write_audit(
+            db,
+            "auth_session",
+            token_hash[:36],
+            "invalid_session_token",
+            details={"reason": "session_not_found"},
+        )
         return None, None
 
     now = datetime.now(timezone.utc)
-    if auth_session.revoked_at is not None or _as_utc(auth_session.expires_at) <= now:
+    created_at = _as_utc(auth_session.created_at)
+    last_seen_at = _as_utc(auth_session.last_seen_at)
+    expires_at = _as_utc(auth_session.expires_at)
+    idle_cutoff = timedelta(seconds=settings.effective_session_idle_timeout_seconds)
+    absolute_cutoff = timedelta(seconds=settings.effective_session_absolute_timeout_seconds)
+    idle_expired = now - last_seen_at >= idle_cutoff
+    absolute_expired = now - created_at >= absolute_cutoff
+    expired = expires_at <= now or idle_expired or absolute_expired
+    if auth_session.revoked_at is not None or expired:
         clear_session_key(token)
+        clear_session_key_by_hash(auth_session.session_token_hash)
+        if expired and auth_session.revoked_at is None:
+            auth_session.revoked_at = now
+            await write_audit(
+                db,
+                "user",
+                auth_session.user_id,
+                "auto_lock_triggered" if idle_expired else "session_expired",
+                details={
+                    "idle_timeout_seconds": settings.effective_session_idle_timeout_seconds,
+                    "absolute_timeout_seconds": settings.effective_session_absolute_timeout_seconds,
+                },
+            )
+            await write_audit(
+                db,
+                "user",
+                auth_session.user_id,
+                "workspace_locked",
+                details={"reason": "session_expired"},
+            )
         return None, auth_session
 
     user_result = await db.execute(select(User).where(User.id == auth_session.user_id, User.is_active == True))  # noqa: E712
@@ -318,6 +364,14 @@ async def revoke_session(db: AsyncSession, token: str | None) -> bool:
     if not auth_session:
         return False
     auth_session.revoked_at = datetime.now(timezone.utc)
+    await write_audit(
+        db,
+        "user",
+        auth_session.user_id,
+        "workspace_locked",
+        details={"reason": "manual_logout"},
+    )
     clear_session_key(token)
+    clear_session_key_by_hash(auth_session.session_token_hash)
     await db.flush()
     return True

@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import select
+from app.config import settings
 from app.models.user import User
 from app.services.security.key_cache import get_session_key
 
@@ -112,3 +113,53 @@ async def test_logout_clears_cached_key(async_client):
     out = await async_client.post('/api/auth/logout')
     assert out.status_code == 200
     assert get_session_key(token) is None
+
+
+async def test_production_cookie_security_flags(async_client):
+    old_secure = settings.cookie_secure
+    old_samesite = settings.cookie_samesite
+    old_allow_insecure = settings.allow_insecure_cookie_local_dev
+    settings.cookie_secure = True
+    settings.cookie_samesite = "strict"
+    settings.allow_insecure_cookie_local_dev = False
+    try:
+        res = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+        assert res.status_code == 200
+        set_cookie = res.headers.get('set-cookie', '').lower()
+        assert 'httponly' in set_cookie
+        assert 'secure' in set_cookie
+        assert 'samesite=strict' in set_cookie
+    finally:
+        settings.cookie_secure = old_secure
+        settings.cookie_samesite = old_samesite
+        settings.allow_insecure_cookie_local_dev = old_allow_insecure
+
+
+async def test_local_dev_cookie_allows_insecure_only_when_explicit(async_client):
+    old_secure = settings.cookie_secure
+    old_samesite = settings.cookie_samesite
+    old_allow_insecure = settings.allow_insecure_cookie_local_dev
+    settings.cookie_secure = False
+    settings.cookie_samesite = "lax"
+    settings.allow_insecure_cookie_local_dev = True
+    try:
+        res = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+        assert res.status_code == 200
+        set_cookie = res.headers.get('set-cookie', '').lower()
+        assert 'httponly' in set_cookie
+        assert 'samesite=lax' in set_cookie
+        assert ' secure' not in set_cookie
+    finally:
+        settings.cookie_secure = old_secure
+        settings.cookie_samesite = old_samesite
+        settings.allow_insecure_cookie_local_dev = old_allow_insecure
+
+
+async def test_logout_clears_cookie(async_client):
+    setup = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+    assert setup.status_code == 200
+    out = await async_client.post('/api/auth/logout')
+    assert out.status_code == 200
+    set_cookie = out.headers.get('set-cookie', '').lower()
+    assert 'taxai_session=' in set_cookie
+    assert 'max-age=0' in set_cookie or 'expires=' in set_cookie

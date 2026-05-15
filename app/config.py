@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     telemetry_enabled: bool = False
     processing_timeout_seconds: int = 300              # max pipeline run time (5 min)
     enable_legacy_export_routes: bool = False
+    cookie_secure: bool = True
+    cookie_samesite: str = "lax"  # lax | strict | none
+    cookie_domain: str | None = None
+    allow_insecure_cookie_local_dev: bool = False
+    session_idle_timeout_minutes: int = 30
+    session_absolute_timeout_hours: int = 12
+    session_idle_timeout_seconds: int | None = None
+    session_absolute_timeout_seconds: int | None = None
+    lock_on_browser_close: bool = False
 
     # ── Feature flags — always use these, never inline os.getenv("EDITION") ──
 
@@ -62,6 +71,18 @@ class Settings(BaseSettings):
     @property
     def postgres_db(self) -> bool:
         return self.database_url.startswith("postgresql")
+
+    @property
+    def effective_session_idle_timeout_seconds(self) -> int:
+        if self.session_idle_timeout_seconds is not None:
+            return max(60, int(self.session_idle_timeout_seconds))
+        return max(60, int(self.session_idle_timeout_minutes) * 60)
+
+    @property
+    def effective_session_absolute_timeout_seconds(self) -> int:
+        if self.session_absolute_timeout_seconds is not None:
+            return max(300, int(self.session_absolute_timeout_seconds))
+        return max(300, int(self.session_absolute_timeout_hours) * 3600)
 
 
 @lru_cache

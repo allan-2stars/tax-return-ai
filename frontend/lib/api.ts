@@ -371,6 +371,13 @@ export const api = {
     request<{ ok: boolean }>("/api/auth/logout", {
       method: "POST",
     }),
+  authLogoutKeepalive: async () => {
+    await fetch(`${BASE_URL}/api/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+      keepalive: true,
+    });
+  },
   listWorkspaces: () => request<Workspace[]>("/api/workspaces"),
   createWorkspace: (data: { tax_year: string; label: string }) =>
     request<Workspace>("/api/workspaces", {
