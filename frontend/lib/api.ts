@@ -86,6 +86,7 @@ export interface TaxItem {
   description: string;
   confidence: number;
   needs_review: boolean;
+  review_status: "draft" | "needs_review" | "confirmed" | "excluded" | "tax_agent_review";
   review_reason: string | null;
   ato_reference_hint: string | null;
   reviewed_at: string | null;
@@ -237,11 +238,56 @@ export interface ComplianceResult {
   tax_agent_review_triggers: string[];
 }
 
+export interface AuthSetupStatus {
+  is_configured: boolean;
+  auth_mode: "local";
+  has_active_user: boolean;
+}
+
+export interface AuthSessionState {
+  is_authenticated: boolean;
+  app_state: "UNINITIALIZED" | "LOCKED" | "UNLOCKING" | "UNLOCKED" | "SESSION_EXPIRED";
+  user_id?: string | null;
+  display_name?: string | null;
+  expires_at?: string | null;
+}
+
+export type AppAuthState = AuthSessionState["app_state"];
+
+export interface AuthSetupResponse {
+  recovery_key: string;
+  app_state: "UNLOCKED";
+  session_token?: string | null;
+}
+
+export interface Workspace {
+  id: string;
+  user_id: string;
+  tax_year: string;
+  label: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  last_opened_at: string | null;
+}
+
+export interface WorkspaceReviewSummary {
+  total_items: number;
+  draft: number;
+  needs_review: number;
+  confirmed: number;
+  excluded: number;
+  tax_agent_review: number;
+  ready_for_export: boolean;
+  blocking_reasons: string[];
+}
+
 // ── Request helpers ───────────────────────────────────────────────────────────
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     ...options,
   });
   if (!res.ok) {
@@ -259,6 +305,7 @@ async function uploadFile(
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     body: formData,
+    credentials: "include",
   });
   if (!res.ok) {
     const body = await res.text();
@@ -272,6 +319,46 @@ async function uploadFile(
 export const api = {
   /** GET /api/health */
   health: () => request<{ status: string }>("/api/health"),
+
+  // ── Auth / Workspaces (Phase 3) ─────────────────────────────────────────
+  authSetupStatus: () => request<AuthSetupStatus>("/api/auth/setup-status"),
+  authSession: () => request<AuthSessionState>("/api/auth/session"),
+  authSetup: (data: { master_password: string; display_name?: string; email?: string }) =>
+    request<AuthSetupResponse>("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  authUnlock: (data: { master_password: string }) =>
+    request<AuthSessionState>("/api/auth/unlock", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  authLogout: () =>
+    request<{ ok: boolean }>("/api/auth/logout", {
+      method: "POST",
+    }),
+  listWorkspaces: () => request<Workspace[]>("/api/workspaces"),
+  createWorkspace: (data: { tax_year: string; label: string }) =>
+    request<Workspace>("/api/workspaces", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  listWorkspaceItems: (workspaceId: string, reviewStatus?: string) =>
+    request<TaxItem[]>(
+      `/api/workspaces/${workspaceId}/items${reviewStatus ? `?review_status=${reviewStatus}` : ""}`
+    ),
+  setWorkspaceItemReviewStatus: (
+    workspaceId: string,
+    itemId: string,
+    reviewStatus: "confirmed" | "needs_review" | "excluded" | "tax_agent_review",
+    note?: string,
+  ) =>
+    request<TaxItem>(`/api/workspaces/${workspaceId}/items/${itemId}/review-status`, {
+      method: "PATCH",
+      body: JSON.stringify({ review_status: reviewStatus, note }),
+    }),
+  getWorkspaceReviewSummary: (workspaceId: string) =>
+    request<WorkspaceReviewSummary>(`/api/workspaces/${workspaceId}/review-summary`),
 
   // ── Sessions ──────────────────────────────────────────────────────────────
   /** GET /api/sessions */

@@ -11,6 +11,7 @@ class TaxItemCreate(BaseModel):
     description: str | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     needs_review: bool = True
+    review_status: str = "needs_review"
     review_reason: str | None = None
     ato_reference_hint: str | None = None
 
@@ -46,6 +47,7 @@ class TaxItemResponse(BaseModel):
     description: str | None
     confidence: float | None
     needs_review: bool
+    review_status: str
     review_reason: str | None
     ato_reference_hint: str | None
     reviewed_at: datetime | None
@@ -54,3 +56,19 @@ class TaxItemResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class WorkspaceReviewStatusUpdate(BaseModel):
+    review_status: str
+    note: str | None = None
+
+
+class WorkspaceReviewSummaryResponse(BaseModel):
+    total_items: int
+    draft: int
+    needs_review: int
+    confirmed: int
+    excluded: int
+    tax_agent_review: int
+    ready_for_export: bool
+    blocking_reasons: list[str]

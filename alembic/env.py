@@ -31,6 +31,9 @@ from app.models import (  # noqa: F401 — registers all tables
     AppSetting,
     DocumentPage,
     Job,
+    User,
+    AuthSession,
+    TaxWorkspace,
 )
 
 target_metadata = Base.metadata

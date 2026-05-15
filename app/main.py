@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import engine
 from app.db.base import Base
 from app.db.deps import get_db
-from app.routers import sessions, documents, items, audit, export, compliance, jobs, monitoring
+from app.routers import sessions, documents, items, audit, export, compliance, jobs, monitoring, auth, workspaces
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.logging import StructuredLoggingMiddleware
@@ -103,3 +103,5 @@ app.include_router(export.router)
 app.include_router(compliance.router)
 app.include_router(jobs.router)
 app.include_router(monitoring.router)
+app.include_router(auth.router)
+app.include_router(workspaces.router)

@@ -28,6 +28,12 @@ class TaxItem(Base):
         Boolean, nullable=False, default=True,
         comment="True until user confirms or explicitly approves"
     )
+    review_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="needs_review",
+        comment="draft / needs_review / confirmed / excluded / tax_agent_review",
+    )
     review_reason: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="Why this item needs review"
     )

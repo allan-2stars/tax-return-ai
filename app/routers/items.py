@@ -4,8 +4,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.deps import get_db
+from app.db.auth_deps import get_current_user
+from app.db.workspace_scope import (
+    get_or_create_workspace_session,
+    get_workspace_for_user,
+    require_owned_item,
+    require_owned_session,
+    touch_workspace_opened,
+)
 from app.models.tax_item import TaxItem
 from app.models.document import Document
+from app.models.user import User
 from app.schemas.tax_item import (
     TaxItemCreate,
     TaxItemUpdate,
@@ -23,10 +32,21 @@ from app.utils.sanitize import sanitize_description
 router = APIRouter(prefix="/api/items", tags=["items"])
 
 
+def _status_from_needs_review(needs_review: bool) -> str:
+    return "needs_review" if needs_review else "confirmed"
+
+
 @router.post("", response_model=TaxItemResponse, status_code=status.HTTP_201_CREATED)
-async def create_item(data: TaxItemCreate, db: AsyncSession = Depends(get_db)):
+async def create_item(
+    data: TaxItemCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Create a tax item manually."""
+    await require_owned_session(db, current_user, data.session_id)
     item = TaxItem(**data.model_dump())
+    if not item.review_status:
+        item.review_status = _status_from_needs_review(item.needs_review)
     db.add(item)
     await db.flush()
     await write_audit(db, "tax_item", item.id, "created")
@@ -39,6 +59,7 @@ async def create_item(data: TaxItemCreate, db: AsyncSession = Depends(get_db)):
 async def classify_item(
     data: ClassificationRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Classify extracted document text using the configured AI provider.
@@ -104,6 +125,7 @@ async def list_items(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     stmt = (
         select(TaxItem)
@@ -112,6 +134,7 @@ async def list_items(
         .limit(limit)
     )
     if session_id:
+        await require_owned_session(db, current_user, session_id)
         stmt = stmt.where(TaxItem.session_id == session_id)
     if needs_review is not None:
         stmt = stmt.where(TaxItem.needs_review == needs_review)
@@ -122,22 +145,23 @@ async def list_items(
 
 
 @router.get("/{item_id}", response_model=TaxItemResponse)
-async def get_item(item_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(TaxItem).where(TaxItem.id == item_id))
-    item = result.scalar_one_or_none()
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+async def get_item(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    item = await require_owned_item(db, current_user, item_id)
     return item
 
 
 @router.patch("/{item_id}", response_model=TaxItemResponse)
 async def update_item(
-    item_id: str, data: TaxItemUpdate, db: AsyncSession = Depends(get_db)
+    item_id: str,
+    data: TaxItemUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(TaxItem).where(TaxItem.id == item_id))
-    item = result.scalar_one_or_none()
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+    item = await require_owned_item(db, current_user, item_id)
     update_data = data.model_dump(exclude_unset=True)
     if "description" in update_data:
         update_data["description"] = sanitize_description(update_data["description"])
@@ -153,14 +177,21 @@ async def update_item(
 
 @router.post("/{item_id}/review", response_model=TaxItemResponse)
 async def review_item(
-    item_id: str, data: TaxItemReview, db: AsyncSession = Depends(get_db)
+    item_id: str,
+    data: TaxItemReview,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Mark item as reviewed or flagged for review."""
-    result = await db.execute(select(TaxItem).where(TaxItem.id == item_id))
-    item = result.scalar_one_or_none()
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+    item = await require_owned_item(db, current_user, item_id)
     item.needs_review = data.needs_review
+    item.review_status = _status_from_needs_review(data.needs_review)
+    if data.review_reason == "excluded":
+        item.review_status = "excluded"
+        item.needs_review = False
+    if data.review_reason == "tax_agent_review":
+        item.review_status = "tax_agent_review"
+        item.needs_review = True
     if data.review_reason:
         item.review_reason = data.review_reason
     item.reviewed_at = datetime.now(timezone.utc)
@@ -174,7 +205,11 @@ async def review_item(
 
     # Write audit log
     await db.flush()
-    action = "reviewed" if not data.needs_review else "flagged_for_review"
+    action = "item_confirmed" if not data.needs_review else "flagged_for_review"
+    if data.review_reason == "excluded":
+        action = "item_excluded"
+    if data.review_reason == "tax_agent_review":
+        action = "item_tax_agent_review"
     await write_audit(db, "tax_item", item_id, action,
                       details=dict(needs_review=data.needs_review, reason=data.review_reason))
 
@@ -199,6 +234,7 @@ async def review_item(
 async def bulk_review_items(
     data: BulkReviewRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Approve or flag multiple items at once."""
     count = 0
@@ -207,9 +243,11 @@ async def bulk_review_items(
         item = result.scalar_one_or_none()
         if not item:
             continue
+        await require_owned_session(db, current_user, item.session_id)
 
         previous = item.needs_review
         item.needs_review = data.needs_review
+        item.review_status = _status_from_needs_review(data.needs_review)
         if data.review_reason:
             item.review_reason = data.review_reason
         item.reviewed_at = datetime.now(timezone.utc)
@@ -236,11 +274,28 @@ async def bulk_review_items(
 
 
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_item(item_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(TaxItem).where(TaxItem.id == item_id))
-    item = result.scalar_one_or_none()
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+async def delete_item(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await require_owned_item(db, current_user, item_id)
     await db.execute(delete(TaxItem).where(TaxItem.id == item_id))
     await write_audit(db, "tax_item", item_id, "deleted")
     await db.commit()
+
+
+@router.get("/workspaces/{workspace_id}/items", response_model=list[TaxItemResponse])
+async def list_items_by_workspace(
+    workspace_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+    result = await db.execute(
+        select(TaxItem).where(TaxItem.session_id == session.id).order_by(TaxItem.created_at.desc())
+    )
+    await db.commit()
+    return result.scalars().all()

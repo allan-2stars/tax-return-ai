@@ -172,6 +172,7 @@ async def generate_export(
     await write_audit(
         db, "tax_session", session_id, "exported",
         details={
+            "event": "review_pack_generated",
             "total_items": len(items),
             "income_count": len(income_items),
             "deduction_count": len(deduction_items),

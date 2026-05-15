@@ -18,6 +18,7 @@ class TaxSessionUpdate(BaseModel):
 
 class TaxSessionResponse(BaseModel):
     id: str
+    workspace_id: str | None = None
     title: str | None
     financial_year: str
     status: str

@@ -1,4 +1,4 @@
-.PHONY: up down logs backend-shell frontend-shell test migrate revision verify lint format
+.PHONY: up down logs backend-shell frontend-shell test test-auth migrate revision verify lint format
 
 # Detect docker compose command (v2 vs v1)
 DC = $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
@@ -46,6 +46,9 @@ reset-db:
 # ── Testing ───────────────────────────────────────────────────────────────────
 test:
 	$(DC) exec backend pytest tests/ -q --tb=short -x
+
+test-auth:
+	./.venv/bin/pytest -q tests/test_auth_workspace.py
 
 test-coverage:
 	$(DC) exec backend pytest tests/ -q --tb=short --cov=app --cov-report=term-missing

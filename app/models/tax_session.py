@@ -1,7 +1,7 @@
 """TaxSession model — groups documents for one user + one financial year."""
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, DateTime, Enum as SAEnum
+from sqlalchemy import String, Text, DateTime, Enum as SAEnum, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.constants.risk import TaxSessionStatus
@@ -12,6 +12,9 @@ class TaxSession(Base):
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tax_workspaces.id"), nullable=True
     )
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     financial_year: Mapped[str] = mapped_column(

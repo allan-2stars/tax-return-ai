@@ -19,6 +19,9 @@ from app.models.job import Job
 from app.models.review_action import ReviewAction
 from app.models.classification_result import ClassificationResultModel
 from app.models.export_package import ExportPackageModel
+from app.models.user import User
+from app.models.auth_session import AuthSession
+from app.models.tax_workspace import TaxWorkspace
 
 __all__ = [
     "TaxSession",
@@ -32,4 +35,7 @@ __all__ = [
     "ReviewAction",
     "ClassificationResultModel",
     "ExportPackageModel",
+    "User",
+    "AuthSession",
+    "TaxWorkspace",
 ]

@@ -13,7 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db
+from app.db.auth_deps import get_current_user
+from app.db.workspace_scope import (
+    get_or_create_workspace_session,
+    get_workspace_for_user,
+    require_owned_session,
+    touch_workspace_opened,
+)
 from app.models.export_package import ExportPackageModel
+from app.models.user import User
 from app.schemas.export import ExportPackageRecord
 from app.services.export import generate_export
 
@@ -25,12 +33,14 @@ async def export_session(
     session_id: str,
     format: str = Query("json", pattern="^(json|csv)$"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Generate a reviewable export package for the session.
 
     By default returns JSON. Pass ?format=csv to download as CSV.
     Also persists a record to the export_packages table.
     """
+    await require_owned_session(db, current_user, session_id)
     try:
         pkg = await generate_export(db, session_id)
     except ValueError as e:
@@ -91,8 +101,10 @@ async def export_history(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Return all export packages for a session, ordered by newest first."""
+    await require_owned_session(db, current_user, session_id)
     result = await db.execute(
         select(ExportPackageModel)
         .where(ExportPackageModel.session_id == session_id)
@@ -102,3 +114,16 @@ async def export_history(
     )
     records = result.scalars().all()
     return records
+
+
+@router.post("/workspaces/{workspace_id}/review-pack")
+async def export_workspace_review_pack(
+    workspace_id: str,
+    format: str = Query("json", pattern="^(json|csv)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+    return await export_session(session.id, format=format, db=db, current_user=current_user)
