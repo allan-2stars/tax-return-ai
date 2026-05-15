@@ -3,15 +3,11 @@ import { DisclaimerBanner } from "@/components/DisclaimerBanner";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "tax-return-ai — Tax Organiser",
+  title: "Tax Return AI",
   description:
-    "Australian individual tax-ready data generator. Review and organise your tax documents before lodgement.",
+    "Local-first Australian tax evidence review and review-pack workflow.",
 };
 
-/**
- * Root layout — wraps every page.
- * The DisclaimerBanner must be visible on every page, never conditional.
- */
 export default function RootLayout({
   children,
 }: {
@@ -20,26 +16,23 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <nav className="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-4">
-          <a
-            href="/"
-            className="text-lg font-semibold text-ato-blue hover:underline"
-          >
-            tax-return-ai
-          </a>
-          <span className="text-xs text-gray-400">|</span>
-          <span className="text-xs text-gray-500">
-            Draft — for review only. Not a tax return.
-          </span>
-        </nav>
-        <main className="max-w-5xl mx-auto px-4 py-6">
-          <DisclaimerBanner />
+        <header className="border-b border-slate-200 bg-white/90 px-6 py-4 backdrop-blur">
+          <div className="mx-auto flex w-full max-w-7xl items-center justify-between">
+            <div>
+              <a href="/" className="text-base font-semibold tracking-tight text-slate-900">
+                Tax Return AI
+              </a>
+              <p className="text-xs text-slate-500">Local-first tax evidence review</p>
+            </div>
+            <p className="text-xs text-slate-400">Draft workflow foundation</p>
+          </div>
+        </header>
+        <main className="mx-auto w-full max-w-7xl px-6 py-6">
+          <div className="mb-4">
+            <DisclaimerBanner />
+          </div>
           {children}
         </main>
-        <footer className="text-center text-xs text-gray-400 py-4 border-t border-gray-200">
-          tax-return-ai v0.1.0 — This tool does not provide tax advice or lodge
-          returns. Always consult a registered tax agent.
-        </footer>
       </body>
     </html>
   );

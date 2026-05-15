@@ -1,400 +1,269 @@
-# Data Model v2 — tax-return-ai
+# Data Model v2 — Target Definition (No Migration Yet)
 
-> Target state after all rebuild phases. New tables and columns marked with ✦.
+This document defines the target Phase 1 data model for Tax Return AI.
+It is a design specification only. No migration is executed in this phase.
 
----
+## Design goals
+- Local-first confidential document handling
+- Explicit authentication/session boundary for all workspaces
+- Review-first item lifecycle with traceable status transitions
+- Encryption-aware metadata and auditable security events
 
-## Tables
+## Entities
 
-### tax_sessions — Groups documents for one user + one financial year
+## 1) User
+Purpose: local account identity for unlocking and ownership.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `user_id` | UUID FK → users | ❌ | **NEW ✦** — multi-user isolation |
-| `title` | String(200) | ✅ | ✅ |
-| `financial_year` | String(9) | ✅ | ✅ |
-| `status` | String(30) | ✅ | ✅ (values: `draft`, `importing`, `reviewing`, `ready_for_export`, `exported`, `archived`) |
-| `notes` | Text | ✅ | ✅ (encrypted) |
-| `encryption_key_id` | String | ❌ | **NEW ✦** — key version for at-rest encryption |
-| `soft_deleted_at` | DateTime | ❌ | **NEW ✦** — recoverable deletion |
-| `retention_days` | Integer | ❌ | **NEW ✦** — override global retention policy |
-| `expires_at` | DateTime | ❌ | **NEW ✦** — auto-archive/delete threshold |
-| `created_at` | DateTime | ✅ | ✅ |
-| `updated_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `email` (string, nullable for personal edition)
+- `display_name` (string)
+- `master_password_hash` (string)
+- `master_password_salt` (string)
+- `recovery_key_hash` (string)
+- `is_active` (boolean)
+- `created_at` (datetime)
+- `updated_at` (datetime)
+- `last_login_at` (datetime, nullable)
 
----
+Relations:
+- One `User` to many `AuthSession`
+- One `User` to many `TaxWorkspace`
+- One `User` to many `ReviewAction`
+- One `User` to many `AuditEvent`
 
-### documents — Uploaded file metadata
+## 2) AuthSession
+Purpose: lock/unlock session state and inactivity controls.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `session_id` | UUID FK → tax_sessions | ✅ | ✅ |
-| `original_filename` | String(500) | ✅ | ✅ |
-| `mime_type` | String(100) | ✅ | ✅ |
-| `file_size_bytes` | Integer | ✅ | ✅ |
-| `file_hash` | String(64) | ✅ | ✅ — SHA-256 |
-| `storage_path` | String(500) | ✅ | ✅ |
-| `storage_backend` | String(20) | ❌ | **NEW ✦** — 'local' or 's3' |
-| `category` | String(50) | ✅ | ✅ |
-| `ocr_strategy` | String(50) | ❌ | **NEW ✦** — 'pymupdf', 'pdfplumber', 'tesseract', 'mock' |
-| `financial_year` | String(9) | ✅ | ✅ |
-| `status` | String(30) | ✅ | ✅ — 9 canonical states (see doc lifecycle doc) |
-| `status_reason` | Text | ✅ | ✅ |
-| `soft_deleted_at` | DateTime | ❌ | **NEW ✦** — recoverable deletion |
-| `created_at` | DateTime | ✅ | ✅ |
-| `updated_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `user_id` (UUID, FK -> User)
+- `status` (string: active/locked/expired/revoked)
+- `created_at` (datetime)
+- `last_activity_at` (datetime)
+- `expires_at` (datetime)
+- `locked_at` (datetime, nullable)
+- `ip_address` (string, nullable)
+- `user_agent` (string, nullable)
 
----
+Relations:
+- Many `AuthSession` to one `User`
 
-### document_pages — Per-page OCR text
+## 3) TaxWorkspace
+Purpose: tax-year container for documents, items, issues, and exports.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `document_id` | UUID FK → documents | ✅ | ✅ |
-| `page_number` | Integer | ✅ | ✅ |
-| `text` | Text | ✅ → encrypted | **CHANGED ✦** — `encrypted_text` (AES-256-GCM) |
-| `confidence` | Float | ✅ | ✅ |
-| `ocr_method` | String(50) | ✅ | ✅ |
-| `created_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `user_id` (UUID, FK -> User)
+- `title` (string)
+- `financial_year` (string, e.g., `2025-2026`)
+- `status` (string: draft/in_review/ready_for_export/exported/archived)
+- `notes` (encrypted text, nullable)
+- `created_at` (datetime)
+- `updated_at` (datetime)
+- `archived_at` (datetime, nullable)
 
----
+Relations:
+- Many `TaxWorkspace` to one `User`
+- One `TaxWorkspace` to many `Document`
+- One `TaxWorkspace` to many `ExtractedItem`
+- One `TaxWorkspace` to many `ReviewIssue`
+- One `TaxWorkspace` to many `ExportPackage`
+- One `TaxWorkspace` to many `AuditEvent`
 
-### tax_items — Classified line items (canonical product row)
+## 4) Document
+Purpose: uploaded source document metadata and lifecycle state.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `session_id` | UUID FK → tax_sessions | ✅ | ✅ |
-| `item_type` | String(20) | ✅ | ✅ — 'income' or 'deduction' |
-| `category` | String(50) | ✅ | ✅ — reference `app/constants/categories.py` |
-| `amount` | Float / encrypted | ✅ → encrypted | **CHANGED ✦** — `encrypted_amount` (AES-256-GCM) |
-| `description` | Text | ✅ → encrypted | **CHANGED ✦** — `encrypted_description` (AES-256-GCM) |
-| `confidence` | Float | ✅ | ✅ |
-| `review_status` | String(30) | ❌ (was `needs_review` bool) | **NEW ✦** — `draft`, `needs_user_review`, `user_confirmed`, `excluded_by_user`, `needs_tax_agent_review` |
-| `review_reason` | Text | ✅ | ✅ |
-| `reviewed_at` | DateTime | ✅ | ✅ |
-| `reviewed_by` | String(100) | ✅ | ✅ |
-| `ato_reference_hint` | Text | ✅ | ✅ |
-| `source_document_id` | UUID FK → documents | via DocumentItem | **NEW ✦** — direct FK (denormalize for performance) |
-| `financial_year` | String(9) | ✅ | ✅ |
-| `soft_deleted_at` | DateTime | ❌ | **NEW ✦** |
-| `created_at` | DateTime | ✅ | ✅ |
-| `updated_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `workspace_id` (UUID, FK -> TaxWorkspace)
+- `original_filename` (string)
+- `mime_type` (string)
+- `file_size_bytes` (integer)
+- `file_hash_sha256` (string)
+- `storage_backend` (string: local/s3)
+- `storage_path` (string)
+- `status` (DocumentStatus enum)
+- `status_reason` (string, nullable)
+- `created_at` (datetime)
+- `updated_at` (datetime)
+- `deleted_at` (datetime, nullable)
 
----
+Relations:
+- Many `Document` to one `TaxWorkspace`
+- One `Document` to many `DocumentPage`
+- One `Document` to many `ExtractedItem`
+- One `Document` to many `ReviewIssue`
 
-### document_items — Join table (document → items)
+## 5) DocumentPage
+Purpose: page-level extraction output and traceability.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `document_id` | UUID FK → documents | ✅ | ✅ |
-| `item_id` | UUID FK → tax_items | ✅ | ✅ |
-| `page_number` | Integer | ✅ | ✅ |
-| `snippet` | Text | ✅ | ✅ |
-| `ocr_confidence` | Float | ✅ | ✅ |
-| `created_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `document_id` (UUID, FK -> Document)
+- `page_number` (integer)
+- `extracted_text` (encrypted text)
+- `ocr_method` (string)
+- `ocr_confidence` (float, nullable)
+- `created_at` (datetime)
 
----
+Relations:
+- Many `DocumentPage` to one `Document`
 
-### classification_results — Raw AI output per classification run
+## 6) ExtractedItem
+Purpose: candidate tax evidence item derived from document text.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `document_id` | UUID FK → documents | ✅ | ✅ |
-| `session_id` | UUID FK → tax_sessions | ✅ | ✅ |
-| `raw_input` | Text | ✅ → encrypted | **CHANGED ✦** — `encrypted_raw_input` |
-| `raw_output` | Text | ✅ → encrypted | **CHANGED ✦** — `encrypted_raw_output` |
-| `parsed_output` | JSON | ✅ → encrypted | **CHANGED ✦** — `encrypted_parsed_output` |
-| `confidence` | Float | ✅ | ✅ |
-| `provider` | String(50) | ✅ | ✅ |
-| `model` | String(100) | ✅ | ✅ |
-| `strategy` | String(20) | ❌ | **NEW ✦** — `deterministic`, `local_ai`, `cloud_ai` |
-| `timing_ms` | Integer | ✅ | ✅ |
-| `created_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `workspace_id` (UUID, FK -> TaxWorkspace)
+- `document_id` (UUID, FK -> Document)
+- `document_page_id` (UUID, FK -> DocumentPage, nullable)
+- `item_type` (string: income/deduction/out_of_scope/needs_review)
+- `category` (string)
+- `amount` (encrypted numeric/text, nullable)
+- `description` (encrypted text, nullable)
+- `confidence` (float, nullable)
+- `status` (ExtractedItemStatus enum)
+- `status_reason` (string, nullable)
+- `source_snippet` (encrypted text, nullable)
+- `created_at` (datetime)
+- `updated_at` (datetime)
 
----
+Relations:
+- Many `ExtractedItem` to one `TaxWorkspace`
+- Many `ExtractedItem` to one `Document`
+- Many `ExtractedItem` to one `DocumentPage` (optional)
+- One `ExtractedItem` to many `ReviewAction`
+- One `ExtractedItem` to many `ReviewIssue`
 
-### review_actions — Append-only user review events
+## 7) ReviewAction
+Purpose: append-only history of item/user review decisions.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `item_id` | UUID FK → tax_items | ✅ | ✅ |
-| `user_id` | UUID FK → users | ❌ | **NEW ✦** |
-| `action` | String(30) | ✅ | ✅ — 'confirmed', 'excluded', 'flagged', 'amount_edited', 'description_edited' |
-| `previous_status` | String(30) | ✅ | ✅ |
-| `new_status` | String(30) | ✅ | ✅ |
-| `notes` | Text | ✅ → encrypted | **CHANGED ✦** — `encrypted_notes` |
-| `source` | String(20) | ✅ | ✅ — 'user' or 'system' or 'agent' |
-| `created_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `workspace_id` (UUID, FK -> TaxWorkspace)
+- `item_id` (UUID, FK -> ExtractedItem)
+- `user_id` (UUID, FK -> User)
+- `action_type` (string)
+- `from_status` (ExtractedItemStatus enum, nullable)
+- `to_status` (ExtractedItemStatus enum)
+- `notes` (encrypted text, nullable)
+- `created_at` (datetime)
 
----
+Relations:
+- Many `ReviewAction` to one `TaxWorkspace`
+- Many `ReviewAction` to one `ExtractedItem`
+- Many `ReviewAction` to one `User`
 
-### export_packages — Generated export metadata (NOT export data)
+## 8) ReviewIssue
+Purpose: unresolved warnings/questions that block clean export.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `session_id` | UUID FK → tax_sessions | ✅ | ✅ |
-| `format` | String(20) | ✅ | ✅ — 'encrypted_zip', 'json', 'csv' |
-| `item_count` | Integer | ✅ | ✅ |
-| `total_amount` | Float | ✅ | ✅ (encrypted or aggregated — TBD) |
-| `total_taxable` | Float | ✅ | ✅ |
-| `compliance_score` | String(20) | ✅ | ✅ |
-| `export_data` | Text | ✅ → REMOVED | **REMOVED ✦** — export data is no longer persisted; replaced with metadata-only record |
-| `encryption_method` | String(30) | ❌ | **NEW ✦** — 'aes-256-gcm', 'none' |
-| `file_size_bytes` | Integer | ❌ | **NEW ✦** — export pack size before download |
-| `created_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `workspace_id` (UUID, FK -> TaxWorkspace)
+- `document_id` (UUID, FK -> Document, nullable)
+- `item_id` (UUID, FK -> ExtractedItem, nullable)
+- `issue_code` (string)
+- `severity` (string: low/medium/high)
+- `title` (string)
+- `detail` (text)
+- `status` (string: open/resolved/dismissed)
+- `resolved_at` (datetime, nullable)
+- `resolved_by_user_id` (UUID, FK -> User, nullable)
+- `created_at` (datetime)
 
----
+Relations:
+- Many `ReviewIssue` to one `TaxWorkspace`
+- Many `ReviewIssue` to one `Document` (optional)
+- Many `ReviewIssue` to one `ExtractedItem` (optional)
 
-### jobs — Long-running job tracking
+## 9) ExportPackage
+Purpose: export lifecycle metadata and secure-package references.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `session_id` | UUID FK → tax_sessions | ✅ | ✅ |
-| `document_id` | UUID FK → documents | ✅ | ✅ |
-| `job_type` | String(30) | ✅ | ✅ — 'ingestion', 'classification', 'export' |
-| `status` | String(20) | ✅ | ✅ — 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'retrying' |
-| `progress` | Float | ✅ | ✅ |
-| `progress_message` | Text | ✅ | ✅ |
-| `error_message` | Text | ✅ | ✅ (truncate to 500 chars, redact paths) |
-| `result_summary` | JSON | ✅ | ✅ |
-| `worker_id` | String(50) | ❌ | **NEW ✦** — ARQ worker ID for persistent queue |
-| `queued_at` | DateTime | ✅ | ✅ |
-| `started_at` | DateTime | ✅ | ✅ |
-| `completed_at` | DateTime | ✅ | ✅ |
-| `created_at` | DateTime | ✅ | ✅ |
-| `updated_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `workspace_id` (UUID, FK -> TaxWorkspace)
+- `status` (ExportStatus enum)
+- `format` (string: encrypted_zip/json/csv)
+- `encryption_method` (string, nullable)
+- `item_count` (integer)
+- `file_size_bytes` (integer, nullable)
+- `download_count` (integer, default 0)
+- `last_downloaded_at` (datetime, nullable)
+- `failure_reason` (text, nullable)
+- `created_at` (datetime)
+- `updated_at` (datetime)
+- `deleted_at` (datetime, nullable)
 
----
+Relations:
+- Many `ExportPackage` to one `TaxWorkspace`
 
-### audit_events — Append-only event log
+## 10) AuditEvent
+Purpose: append-only security and business event log.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `id` | UUID PK | ✅ | ✅ |
-| `entity_type` | String(50) | ✅ | ✅ |
-| `entity_id` | String(36) | ✅ | ✅ |
-| `event_type` | String(30) | ✅ | ✅ |
-| `details` | JSON | ✅ → encrypted | **CHANGED ✦** — `encrypted_details` (consider if search needs plaintext) |
-| `user_id` | UUID FK → users | ❌ | **NEW ✦** |
-| `ip_address` | String(45) | ❌ | **NEW ✦** — source IP for security events |
-| `user_agent` | String(200) | ❌ | **NEW ✦** — client identifier |
-| `created_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `workspace_id` (UUID, FK -> TaxWorkspace, nullable)
+- `user_id` (UUID, FK -> User, nullable)
+- `entity_type` (string)
+- `entity_id` (string)
+- `event_type` (string)
+- `event_details` (encrypted JSON/text, nullable)
+- `ip_address` (string, nullable)
+- `user_agent` (string, nullable)
+- `created_at` (datetime)
 
----
+Relations:
+- Many `AuditEvent` to one `TaxWorkspace` (optional)
+- Many `AuditEvent` to one `User` (optional)
 
-### app_settings — Runtime key/value configuration
+## 11) EncryptionKeyMetadata
+Purpose: key lifecycle metadata without storing plaintext key material.
 
-| Column | Type | v1 | v2 Changes |
-|---|---|---|---|
-| `key` | String(100) PK | ✅ | ✅ |
-| `value` | Text | ✅ | ✅ |
-| `encrypted` | Boolean | ❌ | **NEW ✦** — if true, value is encrypted |
-| `updated_at` | DateTime | ✅ | ✅ |
+Fields:
+- `id` (UUID, PK)
+- `user_id` (UUID, FK -> User)
+- `key_version` (integer)
+- `kdf_algorithm` (string, e.g., argon2id)
+- `kdf_params` (JSON/text)
+- `key_fingerprint` (string)
+- `status` (string: active/rotating/retired)
+- `created_at` (datetime)
+- `retired_at` (datetime, nullable)
 
----
+Relations:
+- Many `EncryptionKeyMetadata` to one `User`
 
-### ✦ users — NEW table (multi-user support)
+## Required enums
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | UUID PK | |
-| `email` | String(255) | Unique, nullable for personal edition |
-| `display_name` | String(100) | |
-| `password_hash` | String(255) | Argon2id hash |
-| `password_salt` | String(64) | Random salt per user |
-| `recovery_key_hash` | String(255) | For password reset |
-| `recovery_key_salt` | String(64) | |
-| `edition` | String(20) | 'personal', 'pro', 'team' |
-| `is_active` | Boolean | |
-| `last_login_at` | DateTime | |
-| `created_at` | DateTime | |
-| `updated_at` | DateTime | |
+## DocumentStatus
+- `uploaded`
+- `extracting_text`
+- `text_extracted`
+- `classifying`
+- `classified`
+- `needs_review`
+- `reviewed`
+- `included_in_report`
+- `archived`
+- `deleted`
 
----
+## ExtractedItemStatus
+- `draft`
+- `needs_review`
+- `confirmed`
+- `excluded`
+- `tax_agent_review`
 
-### ✦ sessions — NEW table (server-side auth sessions)
+## ExportStatus
+- `draft`
+- `generating`
+- `ready`
+- `failed`
+- `downloaded`
+- `deleted`
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | UUID PK | Session token |
-| `user_id` | UUID FK → users | |
-| `encryption_key` | BLOB | Argon2id-derived key, stored only during session lifetime |
-| `ip_address` | String(45) | |
-| `user_agent` | String(200) | |
-| `expires_at` | DateTime | Auto-lock timeout |
-| `last_activity_at` | DateTime | For idle timeout |
-| `created_at` | DateTime | |
-
----
-
-### ✦ workspaces — NEW table (team edition)
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | UUID PK | |
-| `name` | String(200) | |
-| `owner_id` | UUID FK → users | |
-| `edition` | String(20) | |
-| `settings` | JSON | Workspace-level config |
-| `created_at` | DateTime | |
-| `updated_at` | DateTime | |
-
-### ✦ workspace_members — NEW table (team edition)
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | UUID PK | |
-| `workspace_id` | UUID FK → workspaces | |
-| `user_id` | UUID FK → users | |
-| `role` | String(20) | 'owner', 'editor', 'viewer', 'tax_agent' |
-| `invited_at` | DateTime | |
-| `joined_at` | DateTime | |
-| `created_at` | DateTime | |
-
----
-
-## Entity-Relationship Diagram
-
-```
-users ──┐
-         │
-         ├── owns → workspaces ──┐
-         │                       │
-         ├── member_of ──────────┤ workspace_members
-         │                       │
-         ├── owns → tax_sessions ──────┐
-         │                             │
-         │                             ├── has → documents ────────┐
-         │                             │     │                     │
-         │                             │     ├── has → document_pages
-         │                             │     │
-         │                             │     ├── classified_by → classification_results
-         │                             │     │
-         │                             │     └── linked_to → document_items ──┐
-         │                             │                                      │
-         │                             ├── has → tax_items ──────────────────┘
-         │                             │     │
-         │                             │     ├── reviewed_by → review_actions
-         │                             │     └── exported_in → export_packages
-         │                             │
-         │                             └── has → jobs
-         │
-         └── has → sessions (auth)
-                         │
-                         └──→ audit_events
-```
-
----
-
-## v1 → v2 Migration
-
-### Schema Changes
-
-| Change | Type | Migration |
-|---|---|---|
-| `tax_sessions.user_id` | NEW column | Add FK, backfill with default user for existing data |
-| `tax_sessions.encryption_key_id` | NEW column | Nullable, populated on first encrypt |
-| `tax_sessions.soft_deleted_at` | NEW column | Nullable, existing rows remain NULL |
-| `tax_sessions.expires_at` | NEW column | Nullable |
-| `tax_sessions.retention_days` | NEW column | Default to 365 |
-| `documents.ocr_strategy` | NEW column | Nullable, backfill from v1 logic |
-| `documents.storage_backend` | NEW column | Default 'local' |
-| `documents.soft_deleted_at` | NEW column | Nullable |
-| `document_pages.text` → `encrypted_text` | RENAME + encrypt | Read existing plaintext → encrypt → write → drop old |
-| `tax_items.amount` → `encrypted_amount` | RENAME + encrypt | Same approach |
-| `tax_items.description` → `encrypted_description` | RENAME + encrypt | Same approach |
-| `tax_items.needs_review` → `review_status` | COLUMN TYPE CHANGE | Boolean → enum migration (True → needs_user_review, False → user_confirmed) |
-| `tax_items.source_document_id` | NEW column | Nullable, populated from DocumentItem join |
-| `tax_items.soft_deleted_at` | NEW column | Nullable |
-| `classification_results.*_output` → `encrypted_*` | RENAME + encrypt | Multiple column rename |
-| `classification_results.strategy` | NEW column | Nullable |
-| `review_actions.notes` → `encrypted_notes` | RENAME + encrypt | |
-| `review_actions.user_id` | NEW column | Nullable |
-| `export_packages.export_data` | DROP column | Data migration: read → encrypt → write to file → remove column |
-| `export_packages.encryption_method` | NEW column | Default 'none' for v1 exports |
-| `export_packages.file_size_bytes` | NEW column | Nullable |
-| `jobs.worker_id` | NEW column | Nullable |
-| `audit_events.details` → `encrypted_details` | RENAME + encrypt | Optional — depends on audit searchability requirements |
-| `audit_events.user_id` | NEW column | Nullable |
-| `audit_events.ip_address` | NEW column | Nullable |
-| `audit_events.user_agent` | NEW column | Nullable |
-| `app_settings.encrypted` | NEW column | Default false |
-| Add `users` table | NEW | |
-| Add `sessions` table | NEW | |
-| Add `workspaces` table | NEW | |
-| Add `workspace_members` table | NEW | |
-
-### Migration Strategy
-
-1. Add new nullable columns first (no data loss)
-2. Backfill data: read plaintext → encrypt → write to encrypted column
-3. Add NOT NULL constraints where applicable
-4. Drop old plaintext columns
-5. Add unique constraints, FK constraints
-6. Run migration in deploy without downtime (add before remove)
-
-### Data Encryption Migration
-
-```python
-# Pseudo-code for encrypting existing data
-async def migrate_to_encryption(db, encryptor):
-    # 1. document_pages.text → encrypted_text
-    pages = await db.execute(select(DocumentPage))
-    for page in pages:
-        if page.text:
-            page.encrypted_text = encryptor.encrypt(page.text)
-            page.text = None  # or drop column after migration
-    
-    # 2. tax_items.amount → encrypted_amount
-    items = await db.execute(select(TaxItem))
-    for item in items:
-        if item.amount is not None:
-            item.encrypted_amount = encryptor.encrypt(str(item.amount))
-            item.amount = None
-    
-    # 3. tax_items.needs_review → review_status
-    for item in items:
-        if item.amount is not None:
-            item.review_status = "needs_user_review" if item.needs_review else "user_confirmed"
-    
-    await db.commit()
-```
-
----
-
-## Indexes
-
-| Table | Index | v1 | v2 |
-|---|---|---|---|
-| `tax_sessions` | `user_id` | ❌ | **NEW** |
-| `tax_sessions` | `status` | ✅ | ✅ |
-| `tax_sessions` | `financial_year` | ✅ | ✅ |
-| `tax_sessions` | `soft_deleted_at` | ❌ | **NEW** (filtered) |
-| `documents` | `session_id` | ✅ | ✅ |
-| `documents` | `file_hash` | ✅ | ✅ |
-| `documents` | `session_id + file_hash` | ✅ | ✅ (dedup query) |
-| `documents` | `status` | ✅ | ✅ |
-| `documents` | `soft_deleted_at` | ❌ | **NEW** (filtered) |
-| `document_pages` | `document_id + page_number` | ✅ | ✅ |
-| `tax_items` | `session_id` | ✅ | ✅ |
-| `tax_items` | `review_status` | ❌ | **NEW** |
-| `tax_items` | `item_type + session_id` | ✅ | ✅ |
-| `classification_results` | `document_id` | ✅ | ✅ |
-| `jobs` | `session_id` | ✅ | ✅ |
-| `jobs` | `status` | ✅ | ✅ |
-| `export_packages` | `session_id` | ✅ | ✅ |
-| `audit_events` | `entity_type + entity_id` | ✅ | ✅ |
-| `audit_events` | `created_at` | ✅ | ✅ |
-| `audit_events` | `user_id` | ❌ | **NEW** |
-| `sessions` | `user_id` | ❌ | **NEW** |
-| `sessions` | `expires_at` | ❌ | **NEW** |
-| `workspace_members` | `workspace_id + user_id` | ❌ | **NEW** (unique) |
+## Notes for implementation sequencing
+- Preserve existing tables as scaffolding and migrate incrementally.
+- Keep OCR and AI provider behavior unchanged in this phase.
+- Keep Docker Compose topology unchanged in this phase.
