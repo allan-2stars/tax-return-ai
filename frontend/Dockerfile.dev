@@ -1,0 +1,19 @@
+# Frontend dev image — hot-reload with Next.js dev server
+# Note: frontend is scaffolded in Milestone 9. This Dockerfile tolerates
+# missing package.json by waiting in a loop until the scaffold is ready.
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Expose frontend port
+EXPOSE 3000
+
+# Wait for package.json to appear (frontend scaffolded later), then dev
+CMD ["sh", "-c", "\
+  while [ ! -f package.json ]; do \
+    echo 'Waiting for frontend scaffold (package.json)...'; \
+    sleep 10; \
+  done; \
+  npm install; \
+  npm run dev \
+"]

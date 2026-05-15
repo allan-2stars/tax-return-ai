@@ -1,69 +1,45 @@
+# tax-return-ai — Docker Compose (production mode)
+# Uses production Dockerfiles with health checks and auto-restart.
+# Dev Dockerfiles (Dockerfile.dev) are kept alongside for development.
 
 services:
-  db:
-    image: pgvector/pgvector:pg17
-    restart: unless-stopped
-    shm_size: 256mb
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-taxreturn}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taxreturn}
-      POSTGRES_DB: ${POSTGRES_DB:-taxreturn}
-    ports:
-      - "127.0.0.1:5440:5432"
-    volumes:
-      - ${TAX_DATA_DIR:-/home/pi/tax-return-ai-data}/postgresql:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taxreturn} -d ${POSTGRES_DB:-taxreturn}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8010:8000"
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-taxreturn}:${POSTGRES_PASSWORD:-taxreturn}@db:5432/${POSTGRES_DB:-taxreturn}
-
-      AI_PROVIDER: ${AI_PROVIDER:-deepseek}
-      AI_MODEL: ${AI_MODEL:-deepseek-chat}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-
-      STORAGE_DIR: /app/storage
-      UPLOAD_DIR: /app/storage/uploads
-      EXPORT_DIR: /app/storage/exports
-
-      APP_ENV: development
+      - "127.0.0.1:8010:8010"
     volumes:
-      - ${TAX_DATA_DIR:-/home/pi/tax-return-ai-data}/storage:/app/storage
-    depends_on:
-      db:
-        condition: service_healthy
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///./data/taxapp.db}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
+      - STORAGE_LOCAL_PATH=${STORAGE_LOCAL_PATH:-./data/uploads}
+      - AI_PROVIDER=${AI_PROVIDER:-mock}
+      - OCR_PROVIDER=${OCR_PROVIDER:-mock}
+      - EDITION=${EDITION:-personal}
+      - FINANCIAL_YEAR=${FINANCIAL_YEAR:-2025-2026}
+      - REDACT_SENSITIVE_LOGS=${REDACT_SENSITIVE_LOGS:-true}
+      - TELEMETRY_ENABLED=${TELEMETRY_ENABLED:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
     restart: unless-stopped
     ports:
       - "127.0.0.1:3020:3000"
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8010
     depends_on:
-      - backend
-
-  backup:
-    image: postgres:17-alpine
-    restart: unless-stopped
-    entrypoint: |
-      sh -c '
-        echo "0 3 * * * pg_dump postgresql://${POSTGRES_USER:-taxreturn}:${POSTGRES_PASSWORD:-taxreturn}@db:5432/${POSTGRES_DB:-taxreturn} > /backups/taxreturn-$$(date +\\%Y\\%m\\%d\\%H\\%M\\%S).sql" > /etc/crontabs/root &&
-        crond -f -l 2
-      '
-    volumes:
-      - ${TAX_DATA_DIR:-/home/pi/tax-return-ai-data}/backups:/backups
-    depends_on:
-      - db
+      backend:
+        condition: service_healthy

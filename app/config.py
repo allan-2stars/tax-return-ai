@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     financial_year: str = "2025-2026"       # default for new sessions
 
     # AI
-    ai_provider: str = "anthropic"          # anthropic | openai | mock
+    ai_provider: str = "mock"          # anthropic | openai | mock
     ai_model: str | None = None
     anthropic_api_key: str = ""
     openai_api_key: str = ""
@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     redact_sensitive_logs: bool = True
     telemetry_enabled: bool = False
+    processing_timeout_seconds: int = 300              # max pipeline run time (5 min)
 
     # ── Feature flags — always use these, never inline os.getenv("EDITION") ──
 

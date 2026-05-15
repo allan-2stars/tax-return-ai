@@ -16,8 +16,13 @@ def test_mock_provider_output_is_schema_valid():
     schema = json.loads(
         Path("skills/tax-return-specialist/schemas/tax_analysis_output.schema.json").read_text()
     )
-    result = asyncio.get_event_loop().run_until_complete(
+    result_list = asyncio.get_event_loop().run_until_complete(
         provider.classify("sample text", "doc_test", "2025-2026", "")
     )
-    errors = list(Draft202012Validator(schema).iter_errors(result))
+    errors = []
+    for i, result in enumerate(result_list):
+        item_errors = list(Draft202012Validator(schema).iter_errors(result))
+        for e in item_errors:
+            e.message = f"[item {i}] {e.message}"
+        errors.extend(item_errors)
     assert not errors, [e.message for e in errors]

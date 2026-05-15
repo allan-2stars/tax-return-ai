@@ -34,12 +34,17 @@ def test_example_validates(schema_path, example_path):
 def test_provider_swap_mock_returns_valid_schema(mock_ai_provider):
     """Mock provider must return schema-valid output without touching real APIs."""
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
+    result_list = asyncio.get_event_loop().run_until_complete(
         mock_ai_provider.classify("test text", "doc_001", "2025-2026", "")
     )
     schema = json.loads(
         Path("skills/tax-return-specialist/schemas/tax_analysis_output.schema.json").read_text()
     )
     validator = Draft202012Validator(schema)
-    errors = list(validator.iter_errors(result))
+    errors = []
+    for i, result in enumerate(result_list):
+        item_errors = list(validator.iter_errors(result))
+        for e in item_errors:
+            e.message = f"[item {i}] {e.message}"
+        errors.extend(item_errors)
     assert not errors, f"Mock provider output invalid: {[e.message for e in errors]}"
