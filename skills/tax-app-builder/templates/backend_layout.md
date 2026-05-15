@@ -1,0 +1,31 @@
+# Backend Layout Template
+
+```text
+backend/
+  app/
+    main.py
+    api/
+      routes/
+        health.py
+        tax_sessions.py
+        documents.py
+        review.py
+        exports.py
+    core/
+      config.py
+    db/
+      base.py
+      session.py
+      models/
+    schemas/
+    services/
+      ingestion/
+      classification/
+      compliance_review/
+      export/
+      ai/
+      storage/
+      audit/
+    repositories/
+    tests/
+```

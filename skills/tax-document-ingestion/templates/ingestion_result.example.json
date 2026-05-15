@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.1",
+  "document_id": "doc_002",
+  "tax_session_id": "ses_abc123",
+  "financial_year": "2025-2026",
+  "original_file": {
+    "filename": "officeworks-receipt-march.pdf",
+    "mime_type": "application/pdf",
+    "size_bytes": 48210,
+    "sha256": "a3f1c2e4b5d6a7f8c9e0b1d2a3f4c5e6a7b8d9e0f1a2b3c4d5e6f7a8b9c0d1e2",
+    "storage_uri": "documents/ses_abc123/doc_002/original.pdf",
+    "uploaded_at": "2026-05-13T00:00:00Z",
+    "source_channel": "web_upload"
+  },
+  "status": "ready_for_classification",
+  "document_type": "receipt",
+  "extraction": {
+    "method": "pdf_text",
+    "raw_text": "Officeworks USB hub $89.00 keyboard $60.00 total $149.00 date 12/03/2026",
+    "confidence": 0.91,
+    "page_count": 1,
+    "pages": [
+      {
+        "page_number": 1,
+        "text": "Officeworks USB hub $89.00 keyboard $60.00 total $149.00 date 12/03/2026",
+        "confidence": 0.91
+      }
+    ],
+    "failure_reason": null
+  },
+  "candidate_fields": {
+    "date": "2026-03-12",
+    "date_in_financial_year": true,
+    "amount": 149.00,
+    "currency": "AUD",
+    "supplier_or_source": "Officeworks",
+    "abn": null,
+    "invoice_number": null,
+    "payment_method": null,
+    "description": "USB hub and keyboard"
+  },
+  "missing_or_uncertain_fields": ["work_use_percentage", "reimbursement_status"],
+  "fy_date_warning": null,
+  "duplicate_check": {
+    "status": "not_duplicate",
+    "matched_document_ids": [],
+    "reason": null
+  },
+  "audit": {
+    "created_at": "2026-05-13T00:00:00Z",
+    "processor": "tax-document-ingestion/1.1",
+    "events": [
+      {"timestamp": "2026-05-13T00:00:00Z", "event": "uploaded", "status": "ok", "detail": null},
+      {"timestamp": "2026-05-13T00:00:01Z", "event": "stored", "status": "ok", "detail": null},
+      {"timestamp": "2026-05-13T00:00:02Z", "event": "text_extracted", "status": "ok", "detail": "pdf_text method"},
+      {"timestamp": "2026-05-13T00:00:03Z", "event": "normalised", "status": "ok", "detail": null},
+      {"timestamp": "2026-05-13T00:00:03Z", "event": "ready_for_classification", "status": "ok", "detail": null}
+    ]
+  }
+}

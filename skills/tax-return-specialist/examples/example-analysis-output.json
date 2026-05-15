@@ -1,0 +1,104 @@
+{
+  "items": [
+    {
+      "schema_version": "1.1",
+      "financial_year": "2025-2026",
+      "document_id": "doc_001",
+      "parent_document_id": null,
+      "item_id": "item_001",
+      "item_type": "income",
+      "category": "salary_wages",
+      "amount": 95000.00,
+      "work_use_percentage": null,
+      "currency": "AUD",
+      "date": "2026-06-30",
+      "date_in_financial_year": true,
+      "supplier_or_source": "Acme Pty Ltd",
+      "abn": "12 345 678 901",
+      "description": "Annual income statement — gross salary and PAYG withholding",
+      "confidence": 0.97,
+      "evidence_status": "complete",
+      "risk_level": "low",
+      "review_status": "auto_classified",
+      "reasoning_summary": "Clear income statement with employer ABN, gross salary, and PAYG withholding fields visible.",
+      "alternative_interpretations": [],
+      "missing_fields": [],
+      "suggested_user_questions": [],
+      "source_evidence": {
+        "original_filename": "income-statement-fy2526.pdf",
+        "file_hash": "b4e2d3f5c6a7b8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3",
+        "page": 1,
+        "snippet": "Gross payments: $95,000.00  PAYG withholding: $24,367.00",
+        "bounding_box": null,
+        "ocr_confidence": 0.98
+      },
+      "audit": {
+        "analysis_timestamp": "2026-05-13T00:00:00Z",
+        "analysis_method": "ai",
+        "user_confirmed": true,
+        "user_confirmed_at": "2026-05-13T01:30:00Z",
+        "model_version": "claude-sonnet-4-20250514",
+        "skill_version": "1.1",
+        "correction_history": []
+      }
+    },
+    {
+      "schema_version": "1.1",
+      "financial_year": "2025-2026",
+      "document_id": "doc_002",
+      "parent_document_id": null,
+      "item_id": "item_002",
+      "item_type": "deduction",
+      "category": "tools_equipment",
+      "amount": 149.00,
+      "work_use_percentage": null,
+      "currency": "AUD",
+      "date": "2026-03-12",
+      "date_in_financial_year": true,
+      "supplier_or_source": "Officeworks",
+      "abn": null,
+      "description": "USB hub and keyboard for home office",
+      "confidence": 0.68,
+      "evidence_status": "partial",
+      "risk_level": "medium",
+      "review_status": "needs_user_review",
+      "reasoning_summary": "Likely tools/equipment based on supplier and items. Work-use percentage and reimbursement status not confirmed.",
+      "alternative_interpretations": ["private_or_mixed_use"],
+      "missing_fields": ["work_use_percentage", "reimbursement_status"],
+      "suggested_user_questions": [
+        "What percentage of this purchase was for work?",
+        "Were you reimbursed by your employer?"
+      ],
+      "source_evidence": {
+        "original_filename": "officeworks-receipt-march.pdf",
+        "file_hash": "a3f1c2e4b5d6a7f8c9e0b1d2a3f4c5e6a7b8d9e0f1a2b3c4d5e6f7a8b9c0d1e2",
+        "page": 1,
+        "snippet": "Officeworks USB hub $89.00 keyboard $60.00 total $149.00",
+        "bounding_box": null,
+        "ocr_confidence": 0.91
+      },
+      "audit": {
+        "analysis_timestamp": "2026-05-13T00:00:00Z",
+        "analysis_method": "ai",
+        "user_confirmed": false,
+        "user_confirmed_at": null,
+        "model_version": "claude-sonnet-4-20250514",
+        "skill_version": "1.1",
+        "correction_history": []
+      }
+    }
+  ],
+  "batch_summary": {
+    "financial_year": "2025-2026",
+    "total_items": 2,
+    "income_count": 1,
+    "deduction_count": 1,
+    "needs_review_count": 1,
+    "out_of_scope_count": 0,
+    "high_risk_count": 0,
+    "total_income_aud": 95000.00,
+    "total_candidate_deductions_aud": 149.00,
+    "has_out_of_scope": false,
+    "has_duplicates": false
+  }
+}

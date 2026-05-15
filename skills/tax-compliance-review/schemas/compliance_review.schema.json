@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tax-return-ai:compliance_review:1.1",
+  "title": "ComplianceReviewResult",
+  "description": "Compliance review for a tax session. Uses canonical review_status values consistent with tax_analysis_output v1.1.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tax_session_id",
+    "financial_year",
+    "review_status",
+    "export_readiness",
+    "summary",
+    "items",
+    "unresolved_questions",
+    "tax_agent_review_triggers",
+    "generated_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.1" },
+    "tax_session_id": { "type": "string" },
+    "financial_year": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{4}$",
+      "description": "Australian FY of the session. e.g. '2025-2026'."
+    },
+    "review_status": {
+      "type": "string",
+      "enum": ["not_started", "in_progress", "completed", "blocked"]
+    },
+    "export_readiness": {
+      "type": "object",
+      "required": ["status", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["ready_for_human_review_export", "not_export_ready"]
+        },
+        "reason": { "type": "string" },
+        "fy_dates_validated": {
+          "type": "boolean",
+          "description": "True if all item dates were checked against financial_year."
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["documents_reviewed", "income_items", "deduction_items", "evidence_complete", "evidence_incomplete", "risk_counts"],
+      "additionalProperties": false,
+      "properties": {
+        "documents_reviewed": { "type": "integer", "minimum": 0 },
+        "income_items": { "type": "integer", "minimum": 0 },
+        "deduction_items": { "type": "integer", "minimum": 0 },
+        "evidence_complete": { "type": "integer", "minimum": 0 },
+        "evidence_incomplete": { "type": "integer", "minimum": 0 },
+        "out_of_scope_items": { "type": "integer", "minimum": 0 },
+        "duplicate_items": { "type": "integer", "minimum": 0 },
+        "fy_date_warnings": { "type": "integer", "minimum": 0, "description": "Items with dates outside financial_year." },
+        "risk_counts": {
+          "type": "object",
+          "required": ["low", "medium", "high"],
+          "additionalProperties": false,
+          "properties": {
+            "low": { "type": "integer", "minimum": 0 },
+            "medium": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["item_id", "category", "risk_level", "review_status", "evidence_status", "findings", "required_actions"],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": { "type": "string" },
+          "document_id": { "type": ["string", "null"] },
+          "category": { "type": "string" },
+          "risk_level": { "type": "string", "enum": ["low", "medium", "high"] },
+          "review_status": {
+            "type": "string",
+            "enum": [
+              "auto_classified",
+              "needs_user_review",
+              "needs_tax_agent_review",
+              "user_confirmed",
+              "excluded_by_user",
+              "ready_for_export"
+            ],
+            "description": "Canonical values matching tax_analysis_output v1.1 and app/constants/risk.py."
+          },
+          "evidence_status": {
+            "type": "string",
+            "enum": ["complete", "partial", "missing_or_incomplete", "not_required"]
+          },
+          "date_in_financial_year": { "type": ["boolean", "null"] },
+          "findings": { "type": "array", "items": { "type": "string" } },
+          "required_actions": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "unresolved_questions": { "type": "array", "items": { "type": "string" } },
+    "tax_agent_review_triggers": { "type": "array", "items": { "type": "string" } },
+    "generated_at": { "type": "string" }
+  }
+}

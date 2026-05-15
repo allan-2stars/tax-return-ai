@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.1",
+  "tax_session_id": "ses_abc123",
+  "financial_year": "2025-2026",
+  "review_status": "in_progress",
+  "export_readiness": {
+    "status": "not_export_ready",
+    "reason": "1 item requires user review before export.",
+    "fy_dates_validated": true
+  },
+  "summary": {
+    "documents_reviewed": 2,
+    "income_items": 1,
+    "deduction_items": 1,
+    "evidence_complete": 1,
+    "evidence_incomplete": 1,
+    "out_of_scope_items": 0,
+    "duplicate_items": 0,
+    "fy_date_warnings": 0,
+    "risk_counts": { "low": 1, "medium": 1, "high": 0 }
+  },
+  "items": [
+    {
+      "item_id": "item_001",
+      "document_id": "doc_001",
+      "category": "salary_wages",
+      "risk_level": "low",
+      "review_status": "user_confirmed",
+      "evidence_status": "complete",
+      "date_in_financial_year": true,
+      "findings": ["Income statement with ABN and PAYG confirmed by user."],
+      "required_actions": []
+    },
+    {
+      "item_id": "item_002",
+      "document_id": "doc_002",
+      "category": "tools_equipment",
+      "risk_level": "medium",
+      "review_status": "needs_user_review",
+      "evidence_status": "partial",
+      "date_in_financial_year": true,
+      "findings": ["Work-use percentage not confirmed.", "Reimbursement status unknown."],
+      "required_actions": [
+        "Confirm work-use percentage.",
+        "Confirm not reimbursed by employer."
+      ]
+    }
+  ],
+  "unresolved_questions": [
+    "What percentage of the Officeworks purchase was for work?",
+    "Were you reimbursed by your employer for this purchase?"
+  ],
+  "tax_agent_review_triggers": [],
+  "generated_at": "2026-05-13T00:05:00Z"
+}

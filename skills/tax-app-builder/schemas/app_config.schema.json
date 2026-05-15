@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tax-return-ai:app_config:1.1",
+  "title": "TaxReturnAiAppConfig",
+  "description": "Runtime config for tax-return-ai. All values from environment via app/config.py.",
+  "type": "object",
+  "required": ["edition", "financial_year", "database", "storage", "ai"],
+  "additionalProperties": false,
+  "properties": {
+    "edition": {
+      "type": "string",
+      "enum": ["personal", "pro", "team"],
+      "description": "personal=SQLite/local/no-auth, pro=SQLite/local/no-auth+full-AI, team=PostgreSQL/S3/JWT"
+    },
+    "financial_year": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{4}$",
+      "description": "Default FY for new sessions. e.g. '2025-2026'."
+    },
+    "database": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "SQLAlchemy async URL. sqlite+aiosqlite:///./data/taxapp.db OR postgresql+asyncpg://..."
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "required": ["backend"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "type": "string", "enum": ["local", "s3"] },
+        "local_root": { "type": ["string", "null"], "description": "Required when backend=local. Relative path." },
+        "bucket": { "type": ["string", "null"], "description": "Required when backend=s3." },
+        "region": { "type": ["string", "null"] }
+      }
+    },
+    "ai": {
+      "type": "object",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "enum": ["anthropic", "openai", "mock"] },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "ocr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "enum": ["pdfplumber", "tesseract", "mock"], "default": "pdfplumber" }
+      }
+    }
+  }
+}
