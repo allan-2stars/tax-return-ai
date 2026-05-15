@@ -1,4 +1,4 @@
-.PHONY: up down logs backend-shell frontend-shell test test-auth migrate revision verify lint format
+.PHONY: up down logs backend-shell frontend-shell test test-auth migrate revision verify lint format cleanup-exports
 
 # Detect docker compose command (v2 vs v1)
 DC = $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
@@ -68,6 +68,9 @@ seed-demo:
 
 export-demo:
 	$(DC) exec -w /app backend python scripts/export_demo.py
+
+cleanup-exports:
+	./.venv/bin/python scripts/cleanup_exports.py
 
 # ── Verification (lint + schema + tests) ──────────────────────────────────────
 verify: lint validate-schema test test-frontend

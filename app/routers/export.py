@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db
+from app.config import settings
 from app.db.auth_deps import get_current_user
 from app.db.workspace_scope import (
     get_or_create_workspace_session,
@@ -28,6 +29,11 @@ from app.services.export import generate_export
 router = APIRouter(prefix="/api/export", tags=["export"])
 
 
+def _ensure_legacy_enabled() -> None:
+    if not settings.enable_legacy_export_routes:
+        raise HTTPException(status_code=410, detail="Legacy export routes are disabled. Use workspace review-pack routes.")
+
+
 @router.get("/{session_id}")
 async def export_session(
     session_id: str,
@@ -40,6 +46,7 @@ async def export_session(
     By default returns JSON. Pass ?format=csv to download as CSV.
     Also persists a record to the export_packages table.
     """
+    _ensure_legacy_enabled()
     await require_owned_session(db, current_user, session_id)
     try:
         pkg = await generate_export(db, session_id)
@@ -104,6 +111,7 @@ async def export_history(
     current_user: User = Depends(get_current_user),
 ):
     """Return all export packages for a session, ordered by newest first."""
+    _ensure_legacy_enabled()
     await require_owned_session(db, current_user, session_id)
     result = await db.execute(
         select(ExportPackageModel)
@@ -123,6 +131,7 @@ async def export_workspace_review_pack(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _ensure_legacy_enabled()
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     session = await get_or_create_workspace_session(db, workspace)
     await touch_workspace_opened(workspace)

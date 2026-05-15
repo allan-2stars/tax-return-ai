@@ -19,6 +19,13 @@ from app.models.tax_session import TaxSession
 
 PACK_VERSION = "1.0"
 APP_NAME = "Tax Return AI"
+WEAK_PASSWORDS = {
+    "password",
+    "password123",
+    "123456789012",
+    "qwerty123456",
+    "letmein123456",
+}
 
 
 def _b64(data: bytes) -> str:
@@ -42,6 +49,18 @@ def _derive_key(password: str, salt: bytes) -> tuple[str, bytes, dict]:
     except Exception:
         key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 600_000, dklen=32)
         return "pbkdf2_sha256_600k", key, {"iterations": 600000}
+
+
+def validate_export_password(password: str) -> str | None:
+    if password is None:
+        return "Export password is required."
+    if password.strip() == "":
+        return "Export password cannot be empty."
+    if len(password) < 12:
+        return "Export password must be at least 12 characters."
+    if password.lower() in WEAK_PASSWORDS:
+        return "Export password is too common. Choose a stronger password."
+    return None
 
 
 def _encrypt_bytes(plaintext: bytes, password: str) -> tuple[bytes, str, dict]:
@@ -225,6 +244,8 @@ async def generate_encrypted_review_pack(
         format="enc_zip_v1",
         encrypted=True,
         kdf=kdf,
+        encryption_version=PACK_VERSION,
+        kdf_params_summary=json.dumps(envelope.get("kdf_params", {}), separators=(",", ":")),
         file_size=file_size,
         sha256=file_sha,
         item_count=len(items),

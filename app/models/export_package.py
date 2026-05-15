@@ -26,6 +26,8 @@ class ExportPackageModel(Base):
     )
     encrypted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
     kdf: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    encryption_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    kdf_params_summary: Mapped[str | None] = mapped_column(String(255), nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)

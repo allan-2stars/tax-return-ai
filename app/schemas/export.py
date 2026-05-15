@@ -30,6 +30,8 @@ class WorkspaceExportRecord(BaseModel):
     format: str
     encrypted: bool
     kdf: str | None
+    encryption_version: str | None
+    kdf_params_summary: str | None
     created_at: datetime
     downloaded_at: datetime | None
     file_size: int | None

@@ -38,7 +38,7 @@ async def _seed_ready_item(db_session, session_id: str):
 
 
 async def test_generate_requires_auth(async_client):
-    res = await async_client.post('/api/workspaces/w1/review-pack/generate', json={'export_password': 'password123', 'include_source_documents': False})
+    res = await async_client.post('/api/workspaces/w1/review-pack/generate', json={'export_password': 'verystrongpass123', 'include_source_documents': False})
     assert res.status_code == 401
 
 
@@ -65,7 +65,7 @@ async def test_generate_wrong_workspace_blocked(async_client, db_session):
 
     blocked = await async_client.post(
         f'/api/workspaces/{other_workspace.id}/review-pack/generate',
-        json={'export_password': 'password123', 'include_source_documents': False},
+        json={'export_password': 'verystrongpass123', 'include_source_documents': False},
     )
     assert blocked.status_code == 404
 
@@ -87,9 +87,20 @@ async def test_generate_not_ready_blocked(async_client, db_session):
 
     blocked = await async_client.post(
         f'/api/workspaces/{workspace_id}/review-pack/generate',
-        json={'export_password': 'password123', 'include_source_documents': False},
+        json={'export_password': 'verystrongpass123', 'include_source_documents': False},
     )
     assert blocked.status_code == 409
+
+
+async def test_weak_password_rejected(async_client, db_session):
+    workspace_id = await _setup_workspace(async_client)
+    session = await _ensure_session(async_client, db_session, workspace_id)
+    await _seed_ready_item(db_session, session.id)
+    weak = await async_client.post(
+        f'/api/workspaces/{workspace_id}/review-pack/generate',
+        json={'export_password': 'password123', 'include_source_documents': False},
+    )
+    assert weak.status_code == 400
 
 
 async def test_generate_ready_and_metadata_only(async_client, db_session):
@@ -99,13 +110,16 @@ async def test_generate_ready_and_metadata_only(async_client, db_session):
 
     res = await async_client.post(
         f'/api/workspaces/{workspace_id}/review-pack/generate',
-        json={'export_password': 'password123', 'include_source_documents': False},
+        json={'export_password': 'verystrongpass123', 'include_source_documents': False},
     )
     assert res.status_code == 200
     data = res.json()
     assert data['encrypted'] is True
     assert data['format'] == 'enc_zip_v1'
     assert data['file_size'] > 0
+    assert data['sha256']
+    assert data['encryption_version'] == '1.0'
+    assert data['kdf_params_summary']
 
     row = await db_session.execute(select(ExportPackageModel).where(ExportPackageModel.id == data['id']))
     rec = row.scalar_one()
@@ -121,7 +135,7 @@ async def test_download_and_history(async_client, db_session):
 
     gen = await async_client.post(
         f'/api/workspaces/{workspace_id}/review-pack/generate',
-        json={'export_password': 'password123', 'include_source_documents': False},
+        json={'export_password': 'verystrongpass123', 'include_source_documents': False},
     )
     assert gen.status_code == 200
     export_id = gen.json()['id']
@@ -134,6 +148,9 @@ async def test_download_and_history(async_client, db_session):
     dl = await async_client.get(f'/api/workspaces/{workspace_id}/review-pack/{export_id}/download')
     assert dl.status_code == 200
     assert dl.content
+    row = await db_session.execute(select(ExportPackageModel).where(ExportPackageModel.id == export_id))
+    rec = row.scalar_one()
+    assert rec.downloaded_at is not None
 
 
 async def test_wrong_workspace_cannot_download(async_client, db_session):
@@ -143,7 +160,7 @@ async def test_wrong_workspace_cannot_download(async_client, db_session):
 
     gen = await async_client.post(
         f'/api/workspaces/{workspace_id}/review-pack/generate',
-        json={'export_password': 'password123', 'include_source_documents': False},
+        json={'export_password': 'verystrongpass123', 'include_source_documents': False},
     )
     assert gen.status_code == 200
     export_id = gen.json()['id']
@@ -166,3 +183,31 @@ async def test_wrong_workspace_cannot_download(async_client, db_session):
 
     blocked = await async_client.get(f'/api/workspaces/{other_workspace.id}/review-pack/{export_id}/download')
     assert blocked.status_code == 404
+
+
+async def test_delete_review_pack(async_client, db_session):
+    workspace_id = await _setup_workspace(async_client)
+    session = await _ensure_session(async_client, db_session, workspace_id)
+    await _seed_ready_item(db_session, session.id)
+    gen = await async_client.post(
+        f'/api/workspaces/{workspace_id}/review-pack/generate',
+        json={'export_password': 'verystrongpass123', 'include_source_documents': False},
+    )
+    export_id = gen.json()['id']
+    row = await db_session.execute(select(ExportPackageModel).where(ExportPackageModel.id == export_id))
+    rec = row.scalar_one()
+    path = Path(rec.storage_path)
+    assert path.exists()
+    deleted = await async_client.delete(f'/api/workspaces/{workspace_id}/review-pack/{export_id}')
+    assert deleted.status_code == 200
+    history = await async_client.get(f'/api/workspaces/{workspace_id}/review-pack')
+    assert history.status_code == 200
+    rec2 = next(r for r in history.json() if r['id'] == export_id)
+    assert rec2['status'] == 'deleted'
+    assert rec2['filename'] is not None
+    assert not path.exists()
+
+
+async def test_legacy_export_routes_locked_down(async_client):
+    res = await async_client.get('/api/export/any-session-id')
+    assert res.status_code in (401, 410)

@@ -290,6 +290,8 @@ export interface WorkspaceExportRecord {
   format: string;
   encrypted: boolean;
   kdf: string | null;
+  encryption_version: string | null;
+  kdf_params_summary: string | null;
   created_at: string;
   downloaded_at: string | null;
   file_size: number | null;
@@ -297,6 +299,16 @@ export interface WorkspaceExportRecord {
   item_count: number;
   document_count: number | null;
   blocking_reasons: string | null;
+}
+
+export interface WorkspaceAuditEvent {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  changed_by: string | null;
+  details: string | null;
+  created_at: string;
 }
 
 // ── Request helpers ───────────────────────────────────────────────────────────
@@ -388,6 +400,14 @@ export const api = {
     request<WorkspaceExportRecord[]>(`/api/workspaces/${workspaceId}/review-pack`),
   workspaceReviewPackDownloadUrl: (workspaceId: string, exportId: string) =>
     `${BASE_URL}/api/workspaces/${workspaceId}/review-pack/${exportId}/download`,
+  deleteWorkspaceReviewPack: (workspaceId: string, exportId: string) =>
+    request<{ ok: boolean }>(`/api/workspaces/${workspaceId}/review-pack/${exportId}`, {
+      method: "DELETE",
+    }),
+  listWorkspaceAuditEvents: (workspaceId: string, limit = 50, offset = 0) =>
+    request<WorkspaceAuditEvent[]>(
+      `/api/workspaces/${workspaceId}/audit-events?limit=${limit}&offset=${offset}`
+    ),
 
   // ── Sessions ──────────────────────────────────────────────────────────────
   /** GET /api/sessions */

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     redact_sensitive_logs: bool = True
     telemetry_enabled: bool = False
     processing_timeout_seconds: int = 300              # max pipeline run time (5 min)
+    enable_legacy_export_routes: bool = False
 
     # ── Feature flags — always use these, never inline os.getenv("EDITION") ──
 

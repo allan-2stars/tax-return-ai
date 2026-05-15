@@ -18,6 +18,8 @@ vi.mock('@/lib/api', () => ({
     listWorkspaceReviewPacks: vi.fn(),
     generateWorkspaceReviewPack: vi.fn(),
     workspaceReviewPackDownloadUrl: vi.fn(),
+    deleteWorkspaceReviewPack: vi.fn(),
+    listWorkspaceAuditEvents: vi.fn(),
   },
 }));
 
@@ -27,6 +29,7 @@ describe('WorkspaceApp API-backed states', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     apiMock.listWorkspaceReviewPacks.mockResolvedValue([]);
+    apiMock.listWorkspaceAuditEvents.mockResolvedValue([]);
     apiMock.workspaceReviewPackDownloadUrl.mockImplementation((workspaceId: string, exportId: string) => `/api/workspaces/${workspaceId}/review-pack/${exportId}/download`);
   });
 
@@ -173,7 +176,7 @@ describe('WorkspaceApp API-backed states', () => {
     render(<WorkspaceApp />);
     fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
     expect(await screen.findByRole('button', { name: 'Generate Encrypted Review Pack' })).toBeInTheDocument();
-    expect(screen.getByText('Save this password. It is required to open the review pack.')).toBeInTheDocument();
+    expect(screen.getByText('This password is required to open the encrypted review pack. It cannot be recovered.')).toBeInTheDocument();
   });
 
   it('renders export history in review pack page', async () => {
@@ -195,6 +198,8 @@ describe('WorkspaceApp API-backed states', () => {
         format: 'enc_zip_v1',
         encrypted: true,
         kdf: 'pbkdf2_sha256_600k',
+        encryption_version: '1.0',
+        kdf_params_summary: '{\"iterations\":600000}',
         created_at: '2026-01-01T00:00:00Z',
         downloaded_at: null,
         file_size: 100,
@@ -208,5 +213,43 @@ describe('WorkspaceApp API-backed states', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
     expect(await screen.findByTestId('export-history')).toBeInTheDocument();
     expect(screen.getByText('tax-review-pack-e1.enc.zip')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+  });
+
+  it('renders recent workspace audit events', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    apiMock.listWorkspaceAuditEvents.mockResolvedValue([
+      { id: 'a1', entity_type: 'export_package', entity_id: 'e1', action: 'review_pack_downloaded', changed_by: 'user', details: null, created_at: '2026-05-15T00:00:00Z' },
+    ]);
+    render(<WorkspaceApp />);
+    expect(await screen.findByTestId('audit-events-panel')).toBeInTheDocument();
+    expect(screen.getByText('review pack downloaded')).toBeInTheDocument();
+  });
+
+  it('blocks generate on password mismatch and shows length hint', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 1, draft: 0, needs_review: 0, confirmed: 1, excluded: 0, tax_agent_review: 0, ready_for_export: true, blocking_reasons: [],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
+    fireEvent.change(screen.getByPlaceholderText('Export password'), { target: { value: 'short' } });
+    fireEvent.change(screen.getByPlaceholderText('Confirm export password'), { target: { value: 'different' } });
+    expect(screen.getByText('Minimum length: 12 characters.')).toBeInTheDocument();
+    expect(screen.getByText('Passwords do not match.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Generate Encrypted Review Pack' })).toBeDisabled();
   });
 });

@@ -9,6 +9,7 @@ import {
   type TaxItem,
   type Workspace,
   type WorkspaceExportRecord,
+  type WorkspaceAuditEvent,
   type WorkspaceReviewSummary,
 } from "@/lib/api";
 
@@ -36,6 +37,7 @@ export function WorkspaceApp() {
   const [exportPassword, setExportPassword] = useState("");
   const [confirmExportPassword, setConfirmExportPassword] = useState("");
   const [exportHistory, setExportHistory] = useState<WorkspaceExportRecord[]>([]);
+  const [auditEvents, setAuditEvents] = useState<WorkspaceAuditEvent[]>([]);
 
   useEffect(() => {
     const init = async () => {
@@ -81,6 +83,18 @@ export function WorkspaceApp() {
         setReviewSummary(summary);
       } catch {
         setReviewSummary(null);
+      }
+    })();
+  }, [authState, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
+    void (async () => {
+      try {
+        const events = await api.listWorkspaceAuditEvents(selectedWorkspaceId, 20, 0);
+        setAuditEvents(events);
+      } catch {
+        setAuditEvents([]);
       }
     })();
   }, [authState, selectedWorkspaceId]);
@@ -292,7 +306,7 @@ export function WorkspaceApp() {
         <header className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
           <div>
             <h2 className="text-sm font-semibold text-slate-800">{activeNav}</h2>
-            <p className="text-xs text-slate-500">Workspace lock is enabled. Document encryption is planned next.</p>
+            <p className="text-xs text-slate-500">Documents are stored locally; database encryption is planned next. Encrypted review packs are enabled. Cloud AI remains optional.</p>
           </div>
           <div className="flex items-center gap-2" data-testid="tax-year-selector">
             <label htmlFor="tax-year" className="text-xs text-slate-500">
@@ -402,7 +416,7 @@ export function WorkspaceApp() {
 
         {activeNav === "Review Pack" && (
           <div className="space-y-2 text-sm text-slate-600" data-testid="review-pack-panel">
-            <p>Review pack is {reviewSummary?.ready_for_export ? "ready" : "not ready"}.</p>
+            <p>Encrypted review pack is {reviewSummary?.ready_for_export ? "ready" : "not ready"}.</p>
             {!reviewSummary?.ready_for_export &&
               (reviewSummary?.blocking_reasons?.length ? (
                 <ul className="list-disc pl-5 text-xs text-slate-500">
@@ -415,8 +429,9 @@ export function WorkspaceApp() {
               <div className="mt-3 space-y-2 rounded-lg border border-slate-200 p-3">
                 <p className="text-xs text-slate-700">Generate Encrypted Review Pack</p>
                 <p className="text-xs text-amber-700">
-                  Save this password. It is required to open the review pack.
+                  This password is required to open the encrypted review pack. It cannot be recovered.
                 </p>
+                <p className="text-xs text-slate-500">Minimum length: 12 characters.</p>
                 <input
                   type="password"
                   value={exportPassword}
@@ -431,6 +446,14 @@ export function WorkspaceApp() {
                   placeholder="Confirm export password"
                   className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs"
                 />
+                {confirmExportPassword.length > 0 && exportPassword !== confirmExportPassword && (
+                  <p className="text-xs text-rose-700">Passwords do not match.</p>
+                )}
+                {exportPassword.length > 0 && (
+                  <p className="text-xs text-slate-500">
+                    Strength hint: {exportPassword.length >= 16 ? "strong length" : exportPassword.length >= 12 ? "acceptable length" : "too short"}
+                  </p>
+                )}
                 <button
                   className="rounded-md border border-slate-300 bg-slate-900 px-3 py-1 text-xs text-white disabled:opacity-50"
                   disabled={
@@ -465,13 +488,30 @@ export function WorkspaceApp() {
                   <div>
                     <p>{e.filename ?? e.id}</p>
                     <p className="text-slate-500">{e.created_at}</p>
+                    <p className="text-slate-500">
+                      {e.file_size ?? 0} bytes · sha256 {e.sha256 ? `${e.sha256.slice(0, 12)}...` : "n/a"} · {e.kdf ?? "kdf-n/a"}
+                    </p>
+                    {e.downloaded_at && <p className="text-slate-500">Downloaded: {e.downloaded_at}</p>}
                   </div>
-                  <a
-                    className="rounded-md border border-slate-300 bg-white px-2 py-1"
-                    href={selectedWorkspaceId ? api.workspaceReviewPackDownloadUrl(selectedWorkspaceId, e.id) : "#"}
-                  >
-                    Download
-                  </a>
+                  <div className="flex gap-2">
+                    <a
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1"
+                      href={selectedWorkspaceId ? api.workspaceReviewPackDownloadUrl(selectedWorkspaceId, e.id) : "#"}
+                    >
+                      Download
+                    </a>
+                    <button
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1"
+                      onClick={async () => {
+                        if (!selectedWorkspaceId) return;
+                        await api.deleteWorkspaceReviewPack(selectedWorkspaceId, e.id);
+                        const history = await api.listWorkspaceReviewPacks(selectedWorkspaceId);
+                        setExportHistory(history);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               ))}
               {exportHistory.length === 0 && <p className="text-xs text-slate-500">No exports yet.</p>}
@@ -510,6 +550,18 @@ export function WorkspaceApp() {
           >
             Simulate session expiry
           </button>
+        </div>
+        <div className="mt-4">
+          <h4 className="text-xs font-semibold text-slate-700">Recent Activity</h4>
+          <div className="mt-2 space-y-2" data-testid="audit-events-panel">
+            {auditEvents.slice(0, 8).map((event) => (
+              <div key={event.id} className="rounded-md border border-slate-200 p-2 text-[11px] text-slate-600">
+                <p className="font-medium text-slate-700">{event.action.replaceAll("_", " ")}</p>
+                <p className="text-slate-500">{event.created_at}</p>
+              </div>
+            ))}
+            {auditEvents.length === 0 && <p className="text-[11px] text-slate-500">No recent audit events.</p>}
+          </div>
         </div>
       </aside>
     </div>
