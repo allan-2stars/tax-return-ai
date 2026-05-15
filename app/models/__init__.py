@@ -22,6 +22,7 @@ from app.models.export_package import ExportPackageModel
 from app.models.user import User
 from app.models.auth_session import AuthSession
 from app.models.tax_workspace import TaxWorkspace
+from app.models.unlock_capability import UnlockCapability
 
 __all__ = [
     "TaxSession",
@@ -38,4 +39,5 @@ __all__ = [
     "User",
     "AuthSession",
     "TaxWorkspace",
+    "UnlockCapability",
 ]

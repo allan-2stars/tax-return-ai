@@ -5,6 +5,8 @@
 - [x] Session token hashing and revocation implemented.
 - [x] Cookie policy is environment-aware (`Secure`/`HttpOnly`/`SameSite` configurable).
 - [x] Production default is secure cookies; insecure local cookies require explicit opt-in.
+- [x] DB-backed unlock capability checks added for sensitive routes (TTL + revocation + epoch).
+- [x] Session/key epoch invalidation path exists for recovery reset and stale sessions.
 - [ ] Multi-user/team RBAC is not in MVP scope.
 
 ## Export Encryption

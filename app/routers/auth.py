@@ -1,10 +1,13 @@
-from datetime import timezone
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db
 from app.config import settings
-from app.db.auth_deps import get_optional_user
+from app.db.auth_deps import get_optional_user, get_current_user
+from app.models.unlock_capability import UnlockCapability
+from app.models.user import User
 from app.schemas.auth import (
     SetupRequest,
     SetupResponse,
@@ -22,6 +25,7 @@ from app.services.auth.service import (
     resolve_session,
     revoke_session,
 )
+from app.services.security.unlock_capability import get_capability_metrics
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -201,3 +205,25 @@ async def session_status(
         display_name=user.display_name,
         expires_at=expires_at,
     )
+
+
+@router.get("/capability-health")
+async def capability_health(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc)
+    active_count = await db.execute(
+        select(func.count())
+        .select_from(UnlockCapability)
+        .where(
+            UnlockCapability.user_id == current_user.id,
+            UnlockCapability.revoked_at.is_(None),
+            UnlockCapability.expires_at > now,
+        )
+    )
+    return {
+        "status": "ok",
+        "active_capability_count": int(active_count.scalar_one() or 0),
+        "metrics": get_capability_metrics(),
+    }

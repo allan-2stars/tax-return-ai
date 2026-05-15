@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
+from app.models.auth_session import AuthSession
 from app.models.job import Job
-from app.models.tax_session import TaxSession
+from app.models.unlock_capability import UnlockCapability
+from app.models.user import User
 from app.repositories.job_repo import JobRepository
 from app.services.job.worker import claim_next_job, heartbeat_job, execute_job
 from app.services.security.key_cache import cache_session_key, clear_session_key
@@ -71,6 +73,37 @@ async def test_worker_checks_job_with_capability(db_session):
     token = "cap-token"
     token_hash = __import__("hashlib").sha256(token.encode("utf-8")).hexdigest()
     cache_session_key(token, "u1", b"k" * 32, datetime.now(timezone.utc) + timedelta(minutes=10))
+    user = User(
+        id="u1",
+        password_kdf="pbkdf2_sha256_600k",
+        password_salt="salt",
+        password_hash="hash",
+        recovery_key_salt="rsalt",
+        recovery_key_hash="rhash",
+        unlock_epoch=1,
+        is_active=True,
+    )
+    db_session.add(user)
+    auth_session = AuthSession(
+        id="s1",
+        user_id="u1",
+        session_token_hash=token_hash,
+        key_epoch=1,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    db_session.add(auth_session)
+    db_session.add(
+        UnlockCapability(
+            user_id="u1",
+            auth_session_id="s1",
+            session_token_hash=token_hash,
+            key_epoch=1,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            last_seen_at=datetime.now(timezone.utc),
+        )
+    )
 
     repo = JobRepository(db_session)
     job = await repo.create(

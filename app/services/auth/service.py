@@ -15,6 +15,12 @@ from app.models.auth_session import AuthSession
 from app.models.tax_workspace import TaxWorkspace
 from app.services.audit.writer import write_audit
 from app.services.security.key_cache import cache_session_key, clear_session_key, clear_session_key_by_hash, clear_user_keys
+from app.services.security.unlock_capability import (
+    issue_unlock_capability,
+    revoke_capabilities_for_user,
+    revoke_capability_for_session,
+    validate_unlock_capability,
+)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 COOKIE_NAME = "taxai_session"
@@ -176,6 +182,10 @@ async def setup_user(
     await seed_default_workspaces(db, user.id)
 
     token, expires_at = await create_session(db, user.id, request)
+    session_token_hash = _sha256_hex(token)
+    session_row = await _get_session_by_hash(db, session_token_hash)
+    if session_row:
+        await issue_unlock_capability(db, user, session_row, session_token_hash)
     cache_session_key(token, user.id, dek, expires_at)
     await write_audit(db, "user", user.id, "workspace_unlocked", details={"reason": "initial_setup"})
     return user, recovery_key, token, expires_at
@@ -210,6 +220,7 @@ async def verify_unlock(db: AsyncSession, master_password: str, request: Request
 
     user.last_unlocked_at = datetime.now(timezone.utc)
     token, expires_at = await create_session(db, user.id, request)
+    session_token_hash = _sha256_hex(token)
     if user.encrypted_dek_by_password:
         password_kek = _derive_kek(master_password, user.password_salt, user.password_kdf)
         dek = _unwrap_dek(user.encrypted_dek_by_password, password_kek)
@@ -222,6 +233,9 @@ async def verify_unlock(db: AsyncSession, master_password: str, request: Request
         user.dek_wrapping_metadata = json.dumps({"scheme": "password_only_bootstrap"}, separators=(",", ":"))
         user.dek_created_at = user.dek_created_at or datetime.now(timezone.utc)
     cache_session_key(token, user.id, dek, expires_at)
+    session_row = await _get_session_by_hash(db, session_token_hash)
+    if session_row:
+        await issue_unlock_capability(db, user, session_row, session_token_hash)
     await write_audit(db, "user", user.id, "workspace_unlocked", details={"reason": "manual_unlock"})
     await db.flush()
     return user, token, expires_at
@@ -256,14 +270,20 @@ async def recovery_reset_password(
     user.encrypted_dek_by_password = _wrap_dek(dek, new_password_kek, "password_kek_v1")
     user.dek_rotated_at = datetime.now(timezone.utc)
     user.last_unlocked_at = datetime.now(timezone.utc)
+    user.unlock_epoch = (user.unlock_epoch or 1) + 1
     revoke_result = await db.execute(
         select(AuthSession).where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
     )
     for row in revoke_result.scalars().all():
         row.revoked_at = datetime.now(timezone.utc)
+    await revoke_capabilities_for_user(db, user.id, revoked_at=datetime.now(timezone.utc))
     clear_user_keys(user.id)
 
     token, expires_at = await create_session(db, user.id, request)
+    session_token_hash = _sha256_hex(token)
+    session_row = await _get_session_by_hash(db, session_token_hash)
+    if session_row:
+        await issue_unlock_capability(db, user, session_row, session_token_hash)
     cache_session_key(token, user.id, dek, expires_at)
     await write_audit(db, "user", user.id, "recovery_reset_completed")
     await write_audit(db, "user", user.id, "workspace_unlocked", details={"reason": "recovery_reset"})
@@ -281,9 +301,13 @@ async def create_session(db: AsyncSession, user_id: str, request: Request) -> tu
     ip_hash = _sha256_hex(client_ip) if client_ip else None
     user_agent = request.headers.get("user-agent")
 
+    user_result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))  # noqa: E712
+    user = user_result.scalar_one_or_none()
+    key_epoch = user.unlock_epoch if user else 1
     session = AuthSession(
         user_id=user_id,
         session_token_hash=token_hash,
+        key_epoch=key_epoch,
         created_at=now,
         expires_at=expires_at,
         last_seen_at=now,
@@ -324,6 +348,7 @@ async def resolve_session(db: AsyncSession, token: str | None) -> tuple[User | N
     if auth_session.revoked_at is not None or expired:
         clear_session_key(token)
         clear_session_key_by_hash(auth_session.session_token_hash)
+        await revoke_capability_for_session(db, auth_session.session_token_hash, revoked_at=now)
         if expired and auth_session.revoked_at is None:
             auth_session.revoked_at = now
             await write_audit(
@@ -349,6 +374,19 @@ async def resolve_session(db: AsyncSession, token: str | None) -> tuple[User | N
     user = user_result.scalar_one_or_none()
     if not user:
         return None, auth_session
+    if user.unlock_epoch != auth_session.key_epoch:
+        auth_session.revoked_at = now
+        await revoke_capability_for_session(db, auth_session.session_token_hash, revoked_at=now)
+        clear_session_key(token)
+        clear_session_key_by_hash(auth_session.session_token_hash)
+        await write_audit(
+            db,
+            "user",
+            user.id,
+            "session_expired",
+            details={"reason": "stale_key_epoch"},
+        )
+        return None, auth_session
 
     auth_session.last_seen_at = now
     await db.flush()
@@ -371,7 +409,23 @@ async def revoke_session(db: AsyncSession, token: str | None) -> bool:
         "workspace_locked",
         details={"reason": "manual_logout"},
     )
+    await revoke_capability_for_session(db, auth_session.session_token_hash)
     clear_session_key(token)
     clear_session_key_by_hash(auth_session.session_token_hash)
     await db.flush()
     return True
+
+
+async def _get_session_by_hash(db: AsyncSession, session_token_hash: str) -> AuthSession | None:
+    result = await db.execute(select(AuthSession).where(AuthSession.session_token_hash == session_token_hash))
+    return result.scalar_one_or_none()
+
+
+async def is_unlock_capability_active(
+    db: AsyncSession,
+    user: User,
+    auth_session: AuthSession,
+    token: str,
+) -> bool:
+    token_hash = _sha256_hex(token)
+    return await validate_unlock_capability(db, user, auth_session, token_hash, touch=True)

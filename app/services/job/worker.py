@@ -13,9 +13,11 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.job import Job
+from app.models.unlock_capability import UnlockCapability
 from app.repositories.job_repo import JobRepository
 from app.services.audit.writer import write_audit
 from app.services.security.key_cache import get_session_key_by_hash
@@ -51,7 +53,7 @@ async def execute_job(db: AsyncSession, job: Job) -> dict[str, Any]:
             payload = {}
 
     if job.requires_encryption:
-        key = _resolve_job_key(job)
+        key = await _resolve_job_key(db, job)
         if not key:
             await _mark_retryable_key_block(db, job)
             raise EncryptionKeyUnavailableError("Encryption capability missing for job")
@@ -67,14 +69,24 @@ async def execute_job(db: AsyncSession, job: Job) -> dict[str, Any]:
     return {"job_id": job.id, "status": "checked", "job_type": job.job_type}
 
 
-def _resolve_job_key(job: Job) -> bytes | None:
+async def _resolve_job_key(db: AsyncSession, job: Job) -> bytes | None:
     if not job.capability_token_hash:
+        return None
+    cap_row = await db.execute(
+        select(UnlockCapability).where(UnlockCapability.session_token_hash == job.capability_token_hash)
+    )
+    capability = cap_row.scalar_one_or_none()
+    if not capability or capability.revoked_at is not None:
         return None
     if job.capability_expires_at:
         now = datetime.now(timezone.utc)
         exp = job.capability_expires_at if job.capability_expires_at.tzinfo else job.capability_expires_at.replace(tzinfo=timezone.utc)
         if exp <= now:
             return None
+    now = datetime.now(timezone.utc)
+    cap_exp = capability.expires_at if capability.expires_at.tzinfo else capability.expires_at.replace(tzinfo=timezone.utc)
+    if cap_exp <= now:
+        return None
     return get_session_key_by_hash(job.capability_token_hash)
 
 
@@ -92,4 +104,3 @@ async def _mark_retryable_key_block(db: AsyncSession, job: Job) -> None:
         details={"job_type": job.job_type},
     )
     await db.flush()
-
