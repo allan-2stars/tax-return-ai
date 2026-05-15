@@ -3,7 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 import React from "react";
 import Link from "next/link";
-import { api, type AppAuthState, type TaxItem, type Workspace, type WorkspaceReviewSummary } from "@/lib/api";
+import {
+  api,
+  type AppAuthState,
+  type TaxItem,
+  type Workspace,
+  type WorkspaceExportRecord,
+  type WorkspaceReviewSummary,
+} from "@/lib/api";
 
 type NavItem = "Dashboard" | "Documents" | "Review Items" | "Issues" | "Review Pack" | "Settings";
 type StepStatus = "todo" | "in_progress" | "ready" | "blocked";
@@ -26,6 +33,9 @@ export function WorkspaceApp() {
   const [reviewSummary, setReviewSummary] = useState<WorkspaceReviewSummary | null>(null);
   const [reviewItems, setReviewItems] = useState<TaxItem[]>([]);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
+  const [exportPassword, setExportPassword] = useState("");
+  const [confirmExportPassword, setConfirmExportPassword] = useState("");
+  const [exportHistory, setExportHistory] = useState<WorkspaceExportRecord[]>([]);
 
   useEffect(() => {
     const init = async () => {
@@ -89,6 +99,18 @@ export function WorkspaceApp() {
       }
     })();
   }, [authState, selectedWorkspaceId, reviewFilter]);
+
+  useEffect(() => {
+    if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
+    void (async () => {
+      try {
+        const history = await api.listWorkspaceReviewPacks(selectedWorkspaceId);
+        setExportHistory(history);
+      } catch {
+        setExportHistory([]);
+      }
+    })();
+  }, [authState, selectedWorkspaceId]);
 
   const selectedWorkspace = workspaces.find((w) => w.id === selectedWorkspaceId) ?? workspaces[0];
   const selectedWorkspaceRouteId = selectedWorkspace?.id ?? "";
@@ -389,6 +411,71 @@ export function WorkspaceApp() {
                   ))}
                 </ul>
               ) : null)}
+            {reviewSummary?.ready_for_export && (
+              <div className="mt-3 space-y-2 rounded-lg border border-slate-200 p-3">
+                <p className="text-xs text-slate-700">Generate Encrypted Review Pack</p>
+                <p className="text-xs text-amber-700">
+                  Save this password. It is required to open the review pack.
+                </p>
+                <input
+                  type="password"
+                  value={exportPassword}
+                  onChange={(e) => setExportPassword(e.target.value)}
+                  placeholder="Export password"
+                  className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs"
+                />
+                <input
+                  type="password"
+                  value={confirmExportPassword}
+                  onChange={(e) => setConfirmExportPassword(e.target.value)}
+                  placeholder="Confirm export password"
+                  className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs"
+                />
+                <button
+                  className="rounded-md border border-slate-300 bg-slate-900 px-3 py-1 text-xs text-white disabled:opacity-50"
+                  disabled={
+                    !selectedWorkspaceId ||
+                    exportPassword.length < 8 ||
+                    exportPassword !== confirmExportPassword
+                  }
+                  onClick={async () => {
+                    if (!selectedWorkspaceId) return;
+                    await api.generateWorkspaceReviewPack(selectedWorkspaceId, {
+                      export_password: exportPassword,
+                      include_source_documents: false,
+                    });
+                    const [history, summary] = await Promise.all([
+                      api.listWorkspaceReviewPacks(selectedWorkspaceId),
+                      api.getWorkspaceReviewSummary(selectedWorkspaceId),
+                    ]);
+                    setExportHistory(history);
+                    setReviewSummary(summary);
+                    setExportPassword("");
+                    setConfirmExportPassword("");
+                  }}
+                >
+                  Generate Encrypted Review Pack
+                </button>
+              </div>
+            )}
+            <div className="mt-3 space-y-2" data-testid="export-history">
+              <p className="text-xs text-slate-700">Export History</p>
+              {exportHistory.map((e) => (
+                <div key={e.id} className="flex items-center justify-between rounded-md border border-slate-200 p-2 text-xs">
+                  <div>
+                    <p>{e.filename ?? e.id}</p>
+                    <p className="text-slate-500">{e.created_at}</p>
+                  </div>
+                  <a
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1"
+                    href={selectedWorkspaceId ? api.workspaceReviewPackDownloadUrl(selectedWorkspaceId, e.id) : "#"}
+                  >
+                    Download
+                  </a>
+                </div>
+              ))}
+              {exportHistory.length === 0 && <p className="text-xs text-slate-500">No exports yet.</p>}
+            </div>
           </div>
         )}
 

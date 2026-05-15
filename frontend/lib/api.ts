@@ -282,6 +282,23 @@ export interface WorkspaceReviewSummary {
   blocking_reasons: string[];
 }
 
+export interface WorkspaceExportRecord {
+  id: string;
+  workspace_id: string | null;
+  filename: string | null;
+  status: string;
+  format: string;
+  encrypted: boolean;
+  kdf: string | null;
+  created_at: string;
+  downloaded_at: string | null;
+  file_size: number | null;
+  sha256: string | null;
+  item_count: number;
+  document_count: number | null;
+  blocking_reasons: string | null;
+}
+
 // ── Request helpers ───────────────────────────────────────────────────────────
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -359,6 +376,18 @@ export const api = {
     }),
   getWorkspaceReviewSummary: (workspaceId: string) =>
     request<WorkspaceReviewSummary>(`/api/workspaces/${workspaceId}/review-summary`),
+  generateWorkspaceReviewPack: (
+    workspaceId: string,
+    data: { export_password: string; include_source_documents: boolean }
+  ) =>
+    request<WorkspaceExportRecord>(`/api/workspaces/${workspaceId}/review-pack/generate`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  listWorkspaceReviewPacks: (workspaceId: string) =>
+    request<WorkspaceExportRecord[]>(`/api/workspaces/${workspaceId}/review-pack`),
+  workspaceReviewPackDownloadUrl: (workspaceId: string, exportId: string) =>
+    `${BASE_URL}/api/workspaces/${workspaceId}/review-pack/${exportId}/download`,
 
   // ── Sessions ──────────────────────────────────────────────────────────────
   /** GET /api/sessions */

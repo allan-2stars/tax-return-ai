@@ -5,7 +5,6 @@ the ExportPackage shape defined in frontend/lib/api.ts.
 
 Now also persists a record to the export_packages table.
 """
-import json
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from sqlalchemy import select
@@ -13,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.tax_session import TaxSession
 from app.models.document import Document
 from app.models.tax_item import TaxItem
-from app.models.export_package import ExportPackageModel
 from app.services.audit.writer import write_audit
 
 
@@ -181,22 +179,9 @@ async def generate_export(
         },
     )
 
-    # Persist to export_packages table
-    pkg_dict = pkg.to_dict()
-    export_record = ExportPackageModel(
-        session_id=session_id,
-        format="json",
-        item_count=len(items),
-        total_amount=round(total_deductions, 2) if total_deductions else None,
-        total_taxable=None,
-        compliance_score=None,
-        export_data=json.dumps(pkg_dict),
-        exported_by="system",
-    )
-    db.add(export_record)
+    # No plaintext export payload persisted in DB.
     await db.commit()
-
-    return pkg_dict
+    return pkg.to_dict()
 
 
 def _generate_warnings(items: list[TaxItem]) -> list[str]:

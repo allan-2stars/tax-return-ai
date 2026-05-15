@@ -15,6 +15,9 @@ vi.mock('@/lib/api', () => ({
     getWorkspaceReviewSummary: vi.fn(),
     listWorkspaceItems: vi.fn(),
     setWorkspaceItemReviewStatus: vi.fn(),
+    listWorkspaceReviewPacks: vi.fn(),
+    generateWorkspaceReviewPack: vi.fn(),
+    workspaceReviewPackDownloadUrl: vi.fn(),
   },
 }));
 
@@ -23,6 +26,8 @@ const apiMock = vi.mocked(api);
 describe('WorkspaceApp API-backed states', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMock.listWorkspaceReviewPacks.mockResolvedValue([]);
+    apiMock.workspaceReviewPackDownloadUrl.mockImplementation((workspaceId: string, exportId: string) => `/api/workspaces/${workspaceId}/review-pack/${exportId}/download`);
   });
 
   it('renders uninitialized setup screen', async () => {
@@ -153,5 +158,55 @@ describe('WorkspaceApp API-backed states', () => {
     expect(actionPanel.textContent).toContain('Needs Review');
     expect(actionPanel.textContent).toContain('Exclude');
     expect(actionPanel.textContent).toContain('Tax Agent Review');
+  });
+
+  it('shows generate controls when review pack is ready', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 1, draft: 0, needs_review: 0, confirmed: 1, excluded: 0, tax_agent_review: 0, ready_for_export: true, blocking_reasons: [],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
+    expect(await screen.findByRole('button', { name: 'Generate Encrypted Review Pack' })).toBeInTheDocument();
+    expect(screen.getByText('Save this password. It is required to open the review pack.')).toBeInTheDocument();
+  });
+
+  it('renders export history in review pack page', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 1, draft: 0, needs_review: 0, confirmed: 1, excluded: 0, tax_agent_review: 0, ready_for_export: true, blocking_reasons: [],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    apiMock.listWorkspaceReviewPacks.mockResolvedValue([
+      {
+        id: 'e1',
+        workspace_id: 'w1',
+        filename: 'tax-review-pack-e1.enc.zip',
+        status: 'ready',
+        format: 'enc_zip_v1',
+        encrypted: true,
+        kdf: 'pbkdf2_sha256_600k',
+        created_at: '2026-01-01T00:00:00Z',
+        downloaded_at: null,
+        file_size: 100,
+        sha256: 'abc',
+        item_count: 1,
+        document_count: 1,
+        blocking_reasons: '[]',
+      },
+    ]);
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
+    expect(await screen.findByTestId('export-history')).toBeInTheDocument();
+    expect(screen.getByText('tax-review-pack-e1.enc.zip')).toBeInTheDocument();
   });
 });

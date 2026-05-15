@@ -29,6 +29,7 @@ jsonschema>=4.21
 boto3>=1.34              # S3-compatible storage
 
 # Crypto / hashing (stdlib hashlib used for SHA-256 — no extra dep needed)
+cryptography>=43.0
 
 # Dev / test
 pytest>=8.0

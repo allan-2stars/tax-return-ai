@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, Form, Query
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,6 +8,7 @@ from app.db.deps import get_db
 from app.db.auth_deps import get_current_user
 from app.db.workspace_scope import get_or_create_workspace_session, get_workspace_for_user, touch_workspace_opened
 from app.models.document import Document
+from app.models.export_package import ExportPackageModel
 from app.models.tax_item import TaxItem
 from app.models.user import User
 from app.models.tax_workspace import TaxWorkspace
@@ -14,7 +16,9 @@ from app.schemas.workspace import WorkspaceCreateRequest, WorkspaceResponse
 from app.services.auth.service import seed_default_workspaces
 from app.services.compliance_review import run_compliance_review
 from app.services.export import generate_export
+from app.services.export.encrypted_pack import generate_encrypted_review_pack
 from app.schemas.tax_item import WorkspaceReviewStatusUpdate, WorkspaceReviewSummaryResponse
+from app.schemas.export import WorkspaceExportGenerateRequest, WorkspaceExportRecord
 from app.services.audit.writer import write_audit
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
@@ -252,3 +256,96 @@ async def generate_workspace_review_pack(
         return pkg
     from app.routers.export import _build_csv_response
     return _build_csv_response(session.id, pkg)
+
+
+@router.post("/{workspace_id}/review-pack/generate", response_model=WorkspaceExportRecord)
+async def generate_workspace_encrypted_review_pack(
+    workspace_id: str,
+    payload: WorkspaceExportGenerateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not payload.export_password or len(payload.export_password) < 8:
+        raise HTTPException(status_code=400, detail="Export password must be at least 8 characters")
+
+    summary = await workspace_review_summary(workspace_id, db=db, current_user=current_user)
+    if not summary.ready_for_export:
+        raise HTTPException(status_code=409, detail=f"Review pack is blocked: {summary.blocking_reasons}")
+
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+
+    try:
+        record = await generate_encrypted_review_pack(
+            db=db,
+            workspace_id=workspace_id,
+            session_id=session.id,
+            export_password=payload.export_password,
+            include_source_documents=payload.include_source_documents,
+            blocking_reasons=summary.blocking_reasons,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await write_audit(
+        db,
+        "export_package",
+        record.id,
+        "encrypted_review_pack_generated",
+        details={"workspace_id": workspace_id, "export_id": record.id, "encrypted": True},
+    )
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
+@router.get("/{workspace_id}/review-pack", response_model=list[WorkspaceExportRecord])
+async def list_workspace_review_pack_history(
+    workspace_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    await touch_workspace_opened(workspace)
+    result = await db.execute(
+        select(ExportPackageModel)
+        .where(ExportPackageModel.workspace_id == workspace_id)
+        .order_by(ExportPackageModel.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/{workspace_id}/review-pack/{export_id}/download")
+async def download_workspace_review_pack(
+    workspace_id: str,
+    export_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    await touch_workspace_opened(workspace)
+    result = await db.execute(
+        select(ExportPackageModel).where(
+            ExportPackageModel.id == export_id,
+            ExportPackageModel.workspace_id == workspace_id,
+        )
+    )
+    record = result.scalar_one_or_none()
+    if not record or not record.storage_path:
+        raise HTTPException(status_code=404, detail="Export package not found")
+
+    from pathlib import Path
+
+    path = Path(record.storage_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Export file not found")
+
+    record.downloaded_at = datetime.now(timezone.utc)
+    await db.flush()
+    await db.commit()
+    return Response(
+        content=path.read_bytes(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={record.filename or path.name}"},
+    )

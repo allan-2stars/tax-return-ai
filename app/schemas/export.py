@@ -15,3 +15,27 @@ class ExportPackageRecord(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class WorkspaceExportGenerateRequest(BaseModel):
+    export_password: str
+    include_source_documents: bool = False
+
+
+class WorkspaceExportRecord(BaseModel):
+    id: str
+    workspace_id: str | None
+    filename: str | None
+    status: str
+    format: str
+    encrypted: bool
+    kdf: str | None
+    created_at: datetime
+    downloaded_at: datetime | None
+    file_size: int | None
+    sha256: str | None
+    item_count: int
+    document_count: int | None
+    blocking_reasons: str | None
+
+    model_config = {"from_attributes": True}
