@@ -14,7 +14,7 @@ from app.ai.providers.mock import MockProvider
 from app.db.base import Base
 from app.db.deps import get_db
 from app.ocr.providers.mock import MockOCRProvider
-from app.routers import auth, workspaces, documents, items, export, compliance
+from app.routers import auth, workspaces, legacy
 
 
 @pytest_asyncio.fixture
@@ -78,10 +78,7 @@ async def async_client(db_session_factory):
     test_app = FastAPI()
     test_app.include_router(auth.router)
     test_app.include_router(workspaces.router)
-    test_app.include_router(documents.router)
-    test_app.include_router(items.router)
-    test_app.include_router(export.router)
-    test_app.include_router(compliance.router)
+    test_app.include_router(legacy.router)
 
     async def override_get_db() -> AsyncGenerator[AsyncSessionAdapter, None]:
         session = db_session_factory()

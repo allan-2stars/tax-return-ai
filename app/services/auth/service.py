@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,8 @@ from fastapi import Request
 from app.models.user import User
 from app.models.auth_session import AuthSession
 from app.models.tax_workspace import TaxWorkspace
+from app.services.security.key_cache import cache_session_key, clear_session_key
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 SESSION_TTL_HOURS = 12
 COOKIE_NAME = "taxai_session"
@@ -29,6 +32,40 @@ def _b64(data: bytes) -> str:
 
 def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def derive_field_encryption_key(master_password: str, password_salt_b64: str, password_kdf: str) -> bytes:
+    """Derive 32-byte field encryption key from master password and existing auth KDF material."""
+    verifier = hash_secret_for_kdf(master_password, password_salt_b64, password_kdf)
+    raw = base64.urlsafe_b64decode(verifier.encode("utf-8"))
+    return hashlib.sha256(raw + b":field-encryption:v1").digest()
+
+
+def _derive_kek(secret: str, salt_b64: str, kdf: str) -> bytes:
+    raw = base64.urlsafe_b64decode(hash_secret_for_kdf(secret, salt_b64, kdf).encode("utf-8"))
+    return hashlib.sha256(raw + b":dek-wrap:v1").digest()
+
+
+def _wrap_dek(dek: bytes, kek: bytes, key_version: str) -> str:
+    nonce = os.urandom(12)
+    ct = AESGCM(kek).encrypt(nonce, dek, None)
+    payload = {
+        "version": "dek_wrapped_v1",
+        "alg": "AES-256-GCM",
+        "nonce": _b64(nonce),
+        "ciphertext": _b64(ct),
+        "key_version": key_version,
+    }
+    return "wrap::" + json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+
+
+def _unwrap_dek(wrapped: str, kek: bytes) -> bytes:
+    if not wrapped.startswith("wrap::"):
+        raise ValueError("Invalid wrapped DEK format")
+    payload = json.loads(wrapped[len("wrap::") :])
+    nonce = base64.urlsafe_b64decode(payload["nonce"].encode("utf-8"))
+    ct = base64.urlsafe_b64decode(payload["ciphertext"].encode("utf-8"))
+    return AESGCM(kek).decrypt(nonce, ct, None)
 
 
 def _hash_with_pbkdf2(secret: str, salt_b64: str, iterations: int = 600_000) -> str:
@@ -73,6 +110,14 @@ def hash_secret_for_kdf(secret: str, salt_b64: str, kdf: str) -> str:
     return _hash_with_pbkdf2(secret, salt_b64)
 
 
+def verify_hash_any_kdf(secret: str, salt_b64: str, expected_hash: str) -> tuple[bool, str]:
+    for kdf in ("argon2id", "pbkdf2_sha256_600k"):
+        candidate = hash_secret_for_kdf(secret, salt_b64, kdf)
+        if hmac.compare_digest(candidate, expected_hash):
+            return True, kdf
+    return False, "pbkdf2_sha256_600k"
+
+
 def generate_recovery_key() -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     raw = "".join(secrets.choice(alphabet) for _ in range(24))
@@ -102,6 +147,12 @@ async def setup_user(
     recovery_salt = _b64(os.urandom(16))
     recovery_kdf, recovery_hash = hash_secret(recovery_key, recovery_salt)
 
+    dek = os.urandom(32)
+    password_kek = _derive_kek(master_password, password_salt, password_kdf)
+    recovery_kek = _derive_kek(recovery_key, recovery_salt, recovery_kdf)
+    wrapped_by_password = _wrap_dek(dek, password_kek, "password_kek_v1")
+    wrapped_by_recovery = _wrap_dek(dek, recovery_kek, "recovery_kek_v1")
+
     user = User(
         email=email,
         display_name=display_name,
@@ -110,6 +161,11 @@ async def setup_user(
         password_hash=password_hash,
         recovery_key_salt=recovery_salt,
         recovery_key_hash=recovery_hash,
+        encrypted_dek_by_password=wrapped_by_password,
+        encrypted_dek_by_recovery=wrapped_by_recovery,
+        dek_version="dek_wrapped_v1",
+        dek_wrapping_metadata=json.dumps({"scheme": "password+recovery"}, separators=(",", ":")),
+        dek_created_at=datetime.now(timezone.utc),
         is_active=True,
         last_unlocked_at=datetime.now(timezone.utc),
     )
@@ -119,6 +175,7 @@ async def setup_user(
     await seed_default_workspaces(db, user.id)
 
     token, expires_at = await create_session(db, user.id, request)
+    cache_session_key(token, user.id, dek, expires_at)
     return user, recovery_key, token, expires_at
 
 
@@ -151,6 +208,54 @@ async def verify_unlock(db: AsyncSession, master_password: str, request: Request
 
     user.last_unlocked_at = datetime.now(timezone.utc)
     token, expires_at = await create_session(db, user.id, request)
+    if user.encrypted_dek_by_password:
+        password_kek = _derive_kek(master_password, user.password_salt, user.password_kdf)
+        dek = _unwrap_dek(user.encrypted_dek_by_password, password_kek)
+    else:
+        # Backward compatibility: bootstrap from legacy password-derived key.
+        dek = derive_field_encryption_key(master_password, user.password_salt, user.password_kdf)
+        password_kek = _derive_kek(master_password, user.password_salt, user.password_kdf)
+        user.encrypted_dek_by_password = _wrap_dek(dek, password_kek, "password_kek_v1")
+        user.dek_version = "legacy_password_derived"
+        user.dek_wrapping_metadata = json.dumps({"scheme": "password_only_bootstrap"}, separators=(",", ":"))
+        user.dek_created_at = user.dek_created_at or datetime.now(timezone.utc)
+    cache_session_key(token, user.id, dek, expires_at)
+    await db.flush()
+    return user, token, expires_at
+
+
+async def recovery_reset_password(
+    db: AsyncSession,
+    recovery_key: str,
+    new_master_password: str,
+    request: Request,
+) -> tuple[User, str, datetime]:
+    user = await get_active_user(db)
+    if not user:
+        raise ValueError("Local user is not configured")
+
+    recovery_ok, recovery_kdf = verify_hash_any_kdf(recovery_key, user.recovery_key_salt, user.recovery_key_hash)
+    if not recovery_ok:
+        raise PermissionError("Invalid recovery key")
+    if not user.encrypted_dek_by_recovery:
+        raise ValueError("Recovery reset unavailable for this account")
+
+    recovery_kek = _derive_kek(recovery_key, user.recovery_key_salt, recovery_kdf)
+    dek = _unwrap_dek(user.encrypted_dek_by_recovery, recovery_kek)
+
+    new_password_salt = _b64(os.urandom(16))
+    new_password_kdf, new_password_hash = hash_secret(new_master_password, new_password_salt)
+    new_password_kek = _derive_kek(new_master_password, new_password_salt, new_password_kdf)
+
+    user.password_salt = new_password_salt
+    user.password_kdf = new_password_kdf
+    user.password_hash = new_password_hash
+    user.encrypted_dek_by_password = _wrap_dek(dek, new_password_kek, "password_kek_v1")
+    user.dek_rotated_at = datetime.now(timezone.utc)
+    user.last_unlocked_at = datetime.now(timezone.utc)
+
+    token, expires_at = await create_session(db, user.id, request)
+    cache_session_key(token, user.id, dek, expires_at)
     await db.flush()
     return user, token, expires_at
 
@@ -191,6 +296,7 @@ async def resolve_session(db: AsyncSession, token: str | None) -> tuple[User | N
 
     now = datetime.now(timezone.utc)
     if auth_session.revoked_at is not None or _as_utc(auth_session.expires_at) <= now:
+        clear_session_key(token)
         return None, auth_session
 
     user_result = await db.execute(select(User).where(User.id == auth_session.user_id, User.is_active == True))  # noqa: E712
@@ -212,5 +318,6 @@ async def revoke_session(db: AsyncSession, token: str | None) -> bool:
     if not auth_session:
         return False
     auth_session.revoked_at = datetime.now(timezone.utc)
+    clear_session_key(token)
     await db.flush()
     return True

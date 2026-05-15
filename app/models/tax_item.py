@@ -23,6 +23,9 @@ class TaxItem(Base):
     )
     amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     needs_review: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True,
@@ -37,6 +40,9 @@ class TaxItem(Base):
     review_reason: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="Why this item needs review"
     )
+    review_reason_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encryption_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    key_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     ato_reference_hint: Mapped[str | None] = mapped_column(
         String(50), nullable=True,
         comment="Optional ATO category reference (e.g. D1, D2, D3, D5)"

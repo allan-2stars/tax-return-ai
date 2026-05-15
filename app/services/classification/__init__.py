@@ -12,12 +12,22 @@ import asyncio
 import json
 import time as time_module
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.ai.factory import get_provider
 from app.ai.providers.base import ClassificationResult
 from app.models.tax_item import TaxItem
 from app.models.document_item import DocumentItem
 from app.models.classification_result import ClassificationResultModel
 from app.services.audit.writer import write_audit
+from app.models.tax_session import TaxSession
+from app.models.tax_workspace import TaxWorkspace
+from app.services.security.key_cache import get_user_active_key
+from app.services.security.field_encryption import (
+    encrypt_text,
+    ENCRYPTION_VERSION,
+    DEFAULT_KEY_VERSION,
+    EncryptionKeyUnavailableError,
+)
 
 
 CONFIDENCE_REVIEW_THRESHOLD = 0.7
@@ -41,6 +51,24 @@ async def classify_document(
     """
     provider = get_provider()
     provider_name = type(provider).__name__.replace("Provider", "").lower()
+    field_key = await _get_session_field_key(db, session_id)
+    if not field_key:
+        await write_audit(
+            db,
+            "classification_result",
+            document_id,
+            "encryption_key_missing",
+            details={"stage": "classification_write", "session_id": session_id},
+        )
+        await write_audit(
+            db,
+            "classification_result",
+            document_id,
+            "encrypted_write_blocked",
+            details={"fields": ["raw_input", "raw_output", "tax_item.description", "tax_item.review_reason"]},
+        )
+        await db.commit()
+        raise EncryptionKeyUnavailableError("Workspace encryption key unavailable")
 
     # Call AI provider with timing (with retry for transient errors)
     start_time = time_module.monotonic()
@@ -106,8 +134,12 @@ async def classify_document(
         document_id=document_id,
         session_id=session_id,
         provider_name=provider_name,
-        raw_input=extracted_text,
-        raw_output=json.dumps([dict(r) for r in results]),
+        raw_input=None,
+        raw_input_enc=encrypt_text(extracted_text, field_key),
+        raw_output=None,
+        raw_output_enc=encrypt_text(json.dumps([dict(r) for r in results]), field_key),
+        encryption_version=ENCRYPTION_VERSION,
+        key_version=DEFAULT_KEY_VERSION,
         parsed_output=json.dumps([dict(r) for r in results]),
         confidence=results[0].get("confidence") if results else None,
         processing_time_ms=processing_time_ms,
@@ -126,10 +158,14 @@ async def classify_document(
             item_type=result.get("item_type", "needs_review"),
             category=result.get("category", "needs_review"),
             amount=result.get("amount"),
-            description=result.get("description", "Classified by AI"),
+            description=None,
+            description_enc=encrypt_text(result.get("description", "Classified by AI"), field_key),
             confidence=result.get("confidence", 0.0),
             needs_review=result.get("needs_review", True),
-            review_reason=result.get("review_reason"),
+            review_reason=None,
+            review_reason_enc=encrypt_text(result.get("review_reason"), field_key),
+            encryption_version=ENCRYPTION_VERSION,
+            key_version=DEFAULT_KEY_VERSION,
             ato_reference_hint=result.get("ato_reference_hint"),
         )
         db.add(item)
@@ -184,3 +220,15 @@ def _apply_review_rules(result: ClassificationResult) -> ClassificationResult:
         result["review_reason"] = "Requires human review."
 
     return result
+
+
+async def _get_session_field_key(db: AsyncSession, session_id: str) -> bytes | None:
+    result = await db.execute(
+        select(TaxWorkspace.user_id)
+        .join(TaxSession, TaxSession.workspace_id == TaxWorkspace.id)
+        .where(TaxSession.id == session_id)
+    )
+    user_id = result.scalar_one_or_none()
+    if not user_id:
+        return None
+    return get_user_active_key(user_id)

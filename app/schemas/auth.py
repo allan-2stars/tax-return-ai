@@ -17,6 +17,11 @@ class UnlockRequest(BaseModel):
     master_password: str
 
 
+class RecoveryResetRequest(BaseModel):
+    recovery_key: str
+    new_master_password: str = Field(min_length=8)
+
+
 class SessionResponse(BaseModel):
     is_authenticated: bool
     app_state: str

@@ -63,3 +63,8 @@ This runbook covers local-first Docker operation for `tax-return-ai` on Raspberr
 - Export file missing:
   - Check `data/exports/` and export metadata in API history.
   - Run cleanup if stale deleted rows remain: `make cleanup-exports`
+
+## Worker Notes (Phase 12)
+- Jobs now include worker lease and encryption capability metadata.
+- If job status is `retrying` with `encryption_key_missing`, unlock workspace and retry workflow.
+- Future dedicated worker should use unique worker IDs and periodic lease heartbeats.

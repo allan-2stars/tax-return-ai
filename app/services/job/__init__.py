@@ -8,6 +8,7 @@ Provides:
 """
 import json
 import traceback
+import hashlib
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories.job_repo import JobRepository
@@ -19,16 +20,33 @@ async def create_job(
     session_id: str | None,
     document_id: str | None,
     job_type: str,
+    workspace_id: str | None = None,
+    user_id: str | None = None,
+    requires_encryption: bool = False,
+    capability_token: str | None = None,
+    capability_expires_at: datetime | None = None,
+    payload: dict | None = None,
 ) -> dict:
     """Create a new job in queued status.
 
     Returns the job as a dict for use in API responses.
     """
     repo = JobRepository(db)
+    capability_token_hash = (
+        hashlib.sha256(capability_token.encode("utf-8")).hexdigest()
+        if capability_token
+        else None
+    )
     job = await repo.create(
         session_id=session_id,
         document_id=document_id,
         job_type=job_type,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        requires_encryption=requires_encryption,
+        capability_token_hash=capability_token_hash,
+        capability_expires_at=capability_expires_at,
+        payload=json.dumps(payload, separators=(",", ":")) if payload is not None else None,
     )
     await write_audit(
         db, "job", job.id, "created",
@@ -36,6 +54,8 @@ async def create_job(
             "job_type": job_type,
             "session_id": session_id,
             "document_id": document_id,
+            "workspace_id": workspace_id,
+            "requires_encryption": requires_encryption,
         },
     )
     return _job_to_dict(job)
@@ -165,9 +185,12 @@ def _job_to_dict(job) -> dict | None:
     return {
         "id": job.id,
         "session_id": job.session_id,
+        "workspace_id": job.workspace_id,
+        "user_id": job.user_id,
         "document_id": job.document_id,
         "job_type": job.job_type,
         "status": job.status,
+        "requires_encryption": job.requires_encryption,
         "progress": job.progress,
         "progress_message": job.progress_message,
         "error_message": job.error_message,

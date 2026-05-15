@@ -25,9 +25,13 @@ class ClassificationResultModel(Base):
     raw_input: Mapped[str | None] = mapped_column(
         Text, nullable=True
     )
+    raw_input_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_output: Mapped[str | None] = mapped_column(
         Text, nullable=True
     )
+    raw_output_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encryption_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    key_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     parsed_output: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="Validated JSON output"
     )

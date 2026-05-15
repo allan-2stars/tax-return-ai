@@ -46,18 +46,16 @@ async def test_list_documents_by_workspace(async_client, db_session):
     session = session_result.scalar_one_or_none()
     assert session is not None
 
-    created = await async_client.post(
-        '/api/documents',
-        json={
-            'session_id': session.id,
-            'original_filename': 'receipt.pdf',
-            'mime_type': 'application/pdf',
-            'file_size_bytes': 1234,
-            'category': 'receipt',
-            'financial_year': session.financial_year,
-        },
+    new_doc = Document(
+        session_id=session.id,
+        original_filename='receipt.pdf',
+        mime_type='application/pdf',
+        file_size_bytes=1234,
+        status='uploaded',
+        financial_year=session.financial_year,
     )
-    assert created.status_code == 201
+    db_session.add(new_doc)
+    await db_session.commit()
 
     listed = await async_client.get(f'/api/workspaces/{workspace_id}/documents')
     assert listed.status_code == 200
@@ -136,4 +134,4 @@ async def test_item_and_export_routes_require_workspace_ownership(async_client, 
     assert blocked.status_code == 404
 
     export_ok = await async_client.post(f'/api/workspaces/{workspace_id}/review-pack')
-    assert export_ok.status_code == 200
+    assert export_ok.status_code == 410

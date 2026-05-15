@@ -21,6 +21,9 @@ class DocumentPage(Base):
     )
     page_number: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encryption_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    key_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     ocr_method: Mapped[str | None] = mapped_column(
         String(30), nullable=True, comment="pdfplumber / tesseract / identity"

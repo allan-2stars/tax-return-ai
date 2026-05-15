@@ -1,4 +1,7 @@
 import pytest
+from sqlalchemy import select
+from app.models.user import User
+from app.services.security.key_cache import get_session_key
 
 
 async def test_setup_status_initial(async_client):
@@ -72,3 +75,40 @@ async def test_workspace_list_and_create(async_client):
     assert created.status_code == 200
     c = created.json()
     assert c['tax_year'] == 'FY2023'
+
+
+async def test_setup_creates_wrapped_dek(async_client, db_session):
+    res = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+    assert res.status_code == 200
+    row = await db_session.execute(select(User))
+    user = row.scalar_one()
+    assert user.encrypted_dek_by_password is not None
+    assert user.encrypted_dek_by_recovery is not None
+    assert user.dek_version is not None
+
+
+async def test_recovery_reset_preserves_access(async_client, db_session):
+    setup = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+    assert setup.status_code == 200
+    recovery_key = setup.json()['recovery_key']
+
+    reset = await async_client.post(
+        '/api/auth/recover-reset',
+        json={'recovery_key': recovery_key, 'new_master_password': 'newsecure123'},
+    )
+    assert reset.status_code == 200
+
+    old_unlock = await async_client.post('/api/auth/unlock', json={'master_password': 'supersecure123'})
+    assert old_unlock.status_code == 401
+    new_unlock = await async_client.post('/api/auth/unlock', json={'master_password': 'newsecure123'})
+    assert new_unlock.status_code == 200
+
+
+async def test_logout_clears_cached_key(async_client):
+    setup = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+    assert setup.status_code == 200
+    token = async_client.cookies.get('taxai_session')
+    assert get_session_key(token) is not None
+    out = await async_client.post('/api/auth/logout')
+    assert out.status_code == 200
+    assert get_session_key(token) is None

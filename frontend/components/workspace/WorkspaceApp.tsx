@@ -24,6 +24,9 @@ export function WorkspaceApp() {
   const [setupStep, setSetupStep] = useState<"create" | "show_key" | "confirm_key">("create");
   const [password, setPassword] = useState("");
   const [unlockInput, setUnlockInput] = useState("");
+  const [showRecoveryReset, setShowRecoveryReset] = useState(false);
+  const [recoveryResetKey, setRecoveryResetKey] = useState("");
+  const [recoveryResetPassword, setRecoveryResetPassword] = useState("");
   const [confirmInput, setConfirmInput] = useState("");
   const [recoveryKey, setRecoveryKey] = useState("");
   const [message, setMessage] = useState<string | null>(null);
@@ -108,8 +111,10 @@ export function WorkspaceApp() {
           reviewFilter === "all" ? undefined : reviewFilter
         );
         setReviewItems(items);
+        setMessage(null);
       } catch {
         setReviewItems([]);
+        setMessage("Workspace is locked. Unlock to view sensitive tax data.");
       }
     })();
   }, [authState, selectedWorkspaceId, reviewFilter]);
@@ -150,13 +155,18 @@ export function WorkspaceApp() {
     status: "confirmed" | "needs_review" | "excluded" | "tax_agent_review"
   ) => {
     if (!selectedWorkspaceId) return;
-    await api.setWorkspaceItemReviewStatus(selectedWorkspaceId, itemId, status);
-    const [summary, items] = await Promise.all([
-      api.getWorkspaceReviewSummary(selectedWorkspaceId),
-      api.listWorkspaceItems(selectedWorkspaceId, reviewFilter === "all" ? undefined : reviewFilter),
-    ]);
-    setReviewSummary(summary);
-    setReviewItems(items);
+    try {
+      await api.setWorkspaceItemReviewStatus(selectedWorkspaceId, itemId, status);
+      const [summary, items] = await Promise.all([
+        api.getWorkspaceReviewSummary(selectedWorkspaceId),
+        api.listWorkspaceItems(selectedWorkspaceId, reviewFilter === "all" ? undefined : reviewFilter),
+      ]);
+      setReviewSummary(summary);
+      setReviewItems(items);
+      setMessage(null);
+    } catch {
+      setMessage("Workspace is locked. Unlock to view sensitive tax data.");
+    }
   };
 
   if (authState === "UNLOCKING") {
@@ -238,36 +248,82 @@ export function WorkspaceApp() {
   if (authState === "LOCKED") {
     return (
       <AuthCard title="Unlock Workspace" subtitle="Enter master password to continue.">
-        <form
-          className="space-y-3"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setAuthState("UNLOCKING");
-            try {
-              const session = await api.authUnlock({ master_password: unlockInput });
-              if (session.is_authenticated || session.app_state === "UNLOCKED") {
-                setMessage(null);
-                setAuthState("UNLOCKED");
-              } else {
+        {!showRecoveryReset ? (
+          <form
+            className="space-y-3"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setAuthState("UNLOCKING");
+              try {
+                const session = await api.authUnlock({ master_password: unlockInput });
+                if (session.is_authenticated || session.app_state === "UNLOCKED") {
+                  setMessage(null);
+                  setAuthState("UNLOCKED");
+                } else {
+                  setAuthState("LOCKED");
+                  setMessage("Invalid password.");
+                }
+              } catch {
                 setAuthState("LOCKED");
                 setMessage("Invalid password.");
               }
-            } catch {
-              setAuthState("LOCKED");
-              setMessage("Invalid password.");
-            }
-          }}
-        >
-          <input
-            type="password"
-            value={unlockInput}
-            onChange={(e) => setUnlockInput(e.target.value)}
-            placeholder="Master password"
-            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
-          />
-          {message && <p className="text-xs text-amber-700">{message}</p>}
-          <button className="rounded-md border border-slate-300 bg-slate-900 px-4 py-2 text-sm text-white">Unlock</button>
-        </form>
+            }}
+          >
+            <input
+              type="password"
+              value={unlockInput}
+              onChange={(e) => setUnlockInput(e.target.value)}
+              placeholder="Master password"
+              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+            />
+            {message && <p className="text-xs text-amber-700">{message}</p>}
+            <button className="rounded-md border border-slate-300 bg-slate-900 px-4 py-2 text-sm text-white">Unlock</button>
+            <button type="button" className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm" onClick={() => setShowRecoveryReset(true)}>
+              Forgot Password
+            </button>
+          </form>
+        ) : (
+          <form
+            className="space-y-3"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                const session = await api.authRecoverReset({
+                  recovery_key: recoveryResetKey,
+                  new_master_password: recoveryResetPassword,
+                });
+                if (session.is_authenticated || session.app_state === "UNLOCKED") {
+                  setMessage(null);
+                  setAuthState("UNLOCKED");
+                }
+              } catch {
+                setMessage("Recovery reset failed. Check recovery key.");
+              }
+            }}
+          >
+            <p className="text-xs text-amber-700">
+              Recovery key restores encrypted data access. Losing both password and recovery key permanently loses data.
+            </p>
+            <input
+              value={recoveryResetKey}
+              onChange={(e) => setRecoveryResetKey(e.target.value.toUpperCase())}
+              placeholder="Recovery key"
+              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+            />
+            <input
+              type="password"
+              value={recoveryResetPassword}
+              onChange={(e) => setRecoveryResetPassword(e.target.value)}
+              placeholder="New master password"
+              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+            />
+            {message && <p className="text-xs text-amber-700">{message}</p>}
+            <button className="rounded-md border border-slate-300 bg-slate-900 px-4 py-2 text-sm text-white">Reset Password</button>
+            <button type="button" className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm" onClick={() => setShowRecoveryReset(false)}>
+              Back
+            </button>
+          </form>
+        )}
       </AuthCard>
     );
   }
@@ -326,6 +382,11 @@ export function WorkspaceApp() {
             </select>
           </div>
         </header>
+        {message && (
+          <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            {message}
+          </div>
+        )}
 
         {activeNav === "Dashboard" && (
           <div className="space-y-3" data-testid="guided-steps">

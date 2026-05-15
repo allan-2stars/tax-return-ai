@@ -10,12 +10,14 @@ from app.schemas.auth import (
     SetupStatusResponse,
     UnlockRequest,
     SessionResponse,
+    RecoveryResetRequest,
 )
 from app.services.auth.service import (
     COOKIE_NAME,
     get_active_user,
     setup_user,
     verify_unlock,
+    recovery_reset_password,
     resolve_session,
     revoke_session,
 )
@@ -73,6 +75,46 @@ async def unlock_auth(
 ):
     try:
         user, token, expires_at = await verify_unlock(db, payload.master_password, request)
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=60 * 60 * 12,
+        path="/",
+    )
+    return {
+        "app_state": "UNLOCKED",
+        "session_token": token,
+        "expires_at": expires_at.isoformat(),
+        "user_id": user.id,
+        "display_name": user.display_name,
+    }
+
+
+@router.post("/recover-reset")
+async def recover_reset_auth(
+    payload: RecoveryResetRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        user, token, expires_at = await recovery_reset_password(
+            db=db,
+            recovery_key=payload.recovery_key,
+            new_master_password=payload.new_master_password,
+            request=request,
+        )
         await db.commit()
     except ValueError as exc:
         await db.rollback()

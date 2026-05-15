@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import engine
 from app.db.base import Base
 from app.db.deps import get_db
-from app.routers import sessions, documents, items, audit, export, compliance, jobs, monitoring, auth, workspaces
+from app.routers import audit, jobs, monitoring, auth, workspaces, legacy
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.logging import StructuredLoggingMiddleware
@@ -95,13 +95,9 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 # ── API Routers ────────────────────────────────────────────────────────────────
-app.include_router(sessions.router)
-app.include_router(documents.router)
-app.include_router(items.router)
 app.include_router(audit.router)
-app.include_router(export.router)
-app.include_router(compliance.router)
 app.include_router(jobs.router)
 app.include_router(monitoring.router)
 app.include_router(auth.router)
 app.include_router(workspaces.router)
+app.include_router(legacy.router)

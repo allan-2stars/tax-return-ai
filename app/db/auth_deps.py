@@ -13,6 +13,10 @@ def _extract_token(request: Request) -> str | None:
     return request.cookies.get(COOKIE_NAME)
 
 
+def get_request_token(request: Request) -> str | None:
+    return _extract_token(request)
+
+
 async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),

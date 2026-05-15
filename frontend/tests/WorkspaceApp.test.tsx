@@ -234,6 +234,22 @@ describe('WorkspaceApp API-backed states', () => {
     expect(screen.getByText('review pack downloaded')).toBeInTheDocument();
   });
 
+  it('does not render legacy /session/:id navigation links', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    render(<WorkspaceApp />);
+    await screen.findByTestId('unlocked-shell');
+    const legacyLink = document.querySelector('a[href^=\"/session/\"]');
+    expect(legacyLink).toBeNull();
+  });
+
   it('blocks generate on password mismatch and shows length hint', async () => {
     apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
     apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
@@ -251,5 +267,53 @@ describe('WorkspaceApp API-backed states', () => {
     expect(screen.getByText('Minimum length: 12 characters.')).toBeInTheDocument();
     expect(screen.getByText('Passwords do not match.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Generate Encrypted Review Pack' })).toBeDisabled();
+  });
+
+  it('shows locked message when sensitive data key is unavailable', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockRejectedValue(new Error('API error 423'));
+    render(<WorkspaceApp />);
+    expect(await screen.findByText('Workspace is locked. Unlock to view sensitive tax data.')).toBeInTheDocument();
+  });
+
+  it('shows locked message when review status update is attempted while locked', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 1, draft: 0, needs_review: 1, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['1 item(s) still need review.'],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([
+      {
+        id: 'i1',
+        session_id: 's1',
+        item_type: 'deduction',
+        category: 'tools_equipment',
+        amount: 20,
+        description: 'receipt',
+        confidence: 0.9,
+        needs_review: true,
+        review_status: 'needs_review',
+        review_reason: null,
+        ato_reference_hint: null,
+        reviewed_at: null,
+        reviewed_by: null,
+        created_at: '',
+      },
+    ]);
+    apiMock.setWorkspaceItemReviewStatus.mockRejectedValue(new Error('API error 423'));
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Items' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('Workspace is locked. Unlock to view sensitive tax data.')).toBeInTheDocument();
   });
 });

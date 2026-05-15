@@ -1,5 +1,6 @@
 """CRUD routes for documents — including file upload endpoint."""
 import os
+from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +66,10 @@ async def upload_document(
     file: UploadFile = File(...),
     category: str | None = Form(default=None),
     financial_year: str | None = Form(default=None),
+    workspace_id: str | None = None,
+    owner_user_id: str | None = None,
+    capability_token: str | None = None,
+    capability_expires_at: datetime | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -127,6 +132,12 @@ async def upload_document(
         session_id=session_id,
         document_id=doc.id,
         job_type="ingestion",
+        workspace_id=workspace_id,
+        user_id=owner_user_id,
+        requires_encryption=True,
+        capability_token=capability_token,
+        capability_expires_at=capability_expires_at,
+        payload={"stage": "ocr_classification"},
     )
 
     await db.commit()
@@ -160,6 +171,10 @@ async def upload_documents_batch(
     files: list[UploadFile] = File(...),
     category: str | None = Form(default=None),
     financial_year: str | None = Form(default=None),
+    workspace_id: str | None = None,
+    owner_user_id: str | None = None,
+    capability_token: str | None = None,
+    capability_expires_at: datetime | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -212,6 +227,12 @@ async def upload_documents_batch(
             session_id=session_id,
             document_id=doc.id,
             job_type="ingestion",
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            requires_encryption=True,
+            capability_token=capability_token,
+            capability_expires_at=capability_expires_at,
+            payload={"stage": "ocr_classification"},
         )
 
         background_tasks.add_task(

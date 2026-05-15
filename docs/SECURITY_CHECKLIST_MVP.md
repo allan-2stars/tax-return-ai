@@ -12,6 +12,7 @@
 - [x] Export metadata stores hash/size/KDF fields only.
 
 ## Database and Storage
+- [x] Field-level encryption-at-rest is partially implemented for selected sensitive text fields.
 - [ ] Full database encryption-at-rest is not implemented yet.
 - [x] Documents and exports stay on local storage by default.
 - [ ] Secure file deletion guarantees are limited by filesystem behavior.

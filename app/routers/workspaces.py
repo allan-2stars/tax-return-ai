@@ -1,29 +1,35 @@
 from datetime import datetime, timezone
 import json
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, Form, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, Form, Query, Request
 from fastapi.responses import Response
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db
 from app.db.auth_deps import get_current_user
+from app.services.auth.service import resolve_session
 from app.db.workspace_scope import get_or_create_workspace_session, get_workspace_for_user, touch_workspace_opened
 from app.models.document import Document
+from app.models.document_page import DocumentPage
 from app.models.export_package import ExportPackageModel
 from app.models.tax_item import TaxItem
 from app.models.user import User
 from app.models.tax_workspace import TaxWorkspace
 from app.models.audit_log import AuditLog
 from app.schemas.workspace import WorkspaceCreateRequest, WorkspaceResponse
+from app.schemas.document import DocumentPageResponse
 from app.services.auth.service import seed_default_workspaces
 from app.services.compliance_review import run_compliance_review
-from app.services.export import generate_export
 from app.services.export.encrypted_pack import generate_encrypted_review_pack
 from app.services.export.encrypted_pack import validate_export_password
-from app.schemas.tax_item import WorkspaceReviewStatusUpdate, WorkspaceReviewSummaryResponse
+from app.schemas.tax_item import WorkspaceReviewStatusUpdate, WorkspaceReviewSummaryResponse, TaxItemResponse
 from app.schemas.export import WorkspaceExportGenerateRequest, WorkspaceExportRecord
 from app.services.audit.writer import write_audit
 from app.services.export.cleanup import cleanup_deleted_review_packs
+from app.services.job import create_job, update_job_status
+from app.services.security.key_cache import get_session_key
+from app.services.security.field_encryption import decrypt_text, is_encrypted
+from app.db.auth_deps import get_request_token
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 VALID_REVIEW_STATUSES = {"draft", "needs_review", "confirmed", "excluded", "tax_agent_review"}
@@ -59,6 +65,53 @@ def _to_response(ws: TaxWorkspace) -> WorkspaceResponse:
         updated_at=ws.updated_at.isoformat(),
         last_opened_at=ws.last_opened_at.isoformat() if ws.last_opened_at else None,
     )
+
+
+def _require_session_field_key(request: Request) -> bytes:
+    token = get_request_token(request)
+    key = get_session_key(token)
+    if not key:
+        raise HTTPException(status_code=423, detail="Workspace is locked. Unlock to view sensitive tax data.")
+    return key
+
+
+async def _require_field_key_for_write(
+    db: AsyncSession,
+    request: Request,
+    entity_type: str,
+    entity_id: str,
+    field_names: list[str],
+) -> bytes:
+    key = get_session_key(get_request_token(request))
+    if key:
+        return key
+    await write_audit(
+        db,
+        entity_type,
+        entity_id,
+        "encryption_key_missing",
+        details={"stage": "write", "field_count": len(field_names)},
+    )
+    await write_audit(
+        db,
+        entity_type,
+        entity_id,
+        "encrypted_write_blocked",
+        details={"fields": field_names},
+    )
+    await db.commit()
+    raise HTTPException(status_code=423, detail="Workspace is locked. Unlock to view sensitive tax data.")
+
+
+def _decrypt_item_fields(item: TaxItem, key: bytes) -> None:
+    if item.description_enc:
+        item.description = decrypt_text(item.description_enc, key)
+    elif item.description and is_encrypted(item.description):
+        item.description = decrypt_text(item.description, key)
+    if getattr(item, "notes_enc", None):
+        item.notes = decrypt_text(item.notes_enc, key)
+    if getattr(item, "review_reason_enc", None):
+        item.review_reason = decrypt_text(item.review_reason_enc, key)
 
 
 @router.get("", response_model=list[WorkspaceResponse])
@@ -126,6 +179,7 @@ async def list_workspace_documents(
 @router.post("/{workspace_id}/documents/upload")
 async def upload_workspace_document(
     workspace_id: str,
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     category: str | None = Form(default=None),
@@ -134,23 +188,34 @@ async def upload_workspace_document(
     current_user: User = Depends(get_current_user),
 ):
     # Reuse existing upload behavior and OCR/classification pipeline unchanged.
-    from app.routers.documents import upload_document_by_workspace
+    from app.routers.documents import upload_document
 
-    return await upload_document_by_workspace(
-        workspace_id=workspace_id,
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+    capability_token = get_request_token(request)
+    _u, auth_session = await resolve_session(db, capability_token)
+
+    return await upload_document(
         background_tasks=background_tasks,
+        session_id=session.id,
         file=file,
         category=category,
-        financial_year=financial_year,
+        financial_year=financial_year or session.financial_year,
+        workspace_id=workspace_id,
+        owner_user_id=current_user.id,
+        capability_token=capability_token,
+        capability_expires_at=auth_session.expires_at if auth_session else None,
         db=db,
         current_user=current_user,
     )
 
 
-@router.get("/{workspace_id}/items")
+@router.get("/{workspace_id}/items", response_model=list[TaxItemResponse])
 async def list_workspace_items(
     workspace_id: str,
     review_status: str | None = Query(default=None),
+    request: Request = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -163,8 +228,29 @@ async def list_workspace_items(
     if review_status:
         stmt = stmt.where(TaxItem.review_status == review_status)
     result = await db.execute(stmt)
+    items = result.scalars().all()
+    legacy_plaintext_reads = 0
+    if any(i.description_enc or i.review_reason_enc or getattr(i, "notes_enc", None) for i in items):
+        key = _require_session_field_key(request)
+        for item in items:
+            _decrypt_item_fields(item, key)
+    for item in items:
+        if not item.description_enc and item.description:
+            legacy_plaintext_reads += 1
+        if not getattr(item, "notes_enc", None) and getattr(item, "notes", None):
+            legacy_plaintext_reads += 1
+        if not item.review_reason_enc and item.review_reason:
+            legacy_plaintext_reads += 1
+    if legacy_plaintext_reads > 0:
+        await write_audit(
+            db,
+            "tax_workspace",
+            workspace_id,
+            "plaintext_legacy_read",
+            details={"entity": "tax_item", "field_reads": legacy_plaintext_reads},
+        )
     await db.commit()
-    return result.scalars().all()
+    return items
 
 
 @router.patch("/{workspace_id}/items/{item_id}/review-status")
@@ -172,6 +258,7 @@ async def set_workspace_item_review_status(
     workspace_id: str,
     item_id: str,
     payload: WorkspaceReviewStatusUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -192,7 +279,21 @@ async def set_workspace_item_review_status(
     previous_status = item.review_status
     item.review_status = payload.review_status
     item.needs_review = payload.review_status in {"draft", "needs_review", "tax_agent_review"}
-    item.review_reason = payload.note
+    key = await _require_field_key_for_write(
+        db,
+        request,
+        "tax_item",
+        item.id,
+        ["review_reason"],
+    )
+    item.review_reason = None
+    item.review_reason_enc = None
+    if payload.note:
+        from app.services.security.field_encryption import encrypt_text, ENCRYPTION_VERSION, DEFAULT_KEY_VERSION
+
+        item.review_reason_enc = encrypt_text(payload.note, key)
+        item.encryption_version = ENCRYPTION_VERSION
+        item.key_version = DEFAULT_KEY_VERSION
     item.reviewed_at = datetime.now(timezone.utc)
     item.reviewed_by = "user"
 
@@ -210,7 +311,52 @@ async def set_workspace_item_review_status(
     await db.flush()
     await db.commit()
     await db.refresh(item)
+    _decrypt_item_fields(item, key)
     return item
+
+
+@router.get("/{workspace_id}/documents/{document_id}/pages", response_model=list[DocumentPageResponse])
+async def list_workspace_document_pages(
+    workspace_id: str,
+    document_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+    doc_result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.session_id == session.id)
+    )
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    page_result = await db.execute(
+        select(DocumentPage).where(DocumentPage.document_id == document_id).order_by(DocumentPage.page_number.asc())
+    )
+    pages = page_result.scalars().all()
+    legacy_plaintext_reads = 0
+    if any((p.text_enc or (p.text and is_encrypted(p.text))) for p in pages):
+        key = _require_session_field_key(request)
+        for page in pages:
+            if page.text_enc:
+                page.text = decrypt_text(page.text_enc, key)
+            elif page.text and is_encrypted(page.text):
+                page.text = decrypt_text(page.text, key)
+    for page in pages:
+        if not page.text_enc and page.text:
+            legacy_plaintext_reads += 1
+    if legacy_plaintext_reads > 0:
+        await write_audit(
+            db,
+            "tax_workspace",
+            workspace_id,
+            "plaintext_legacy_read",
+            details={"entity": "document_page", "field_reads": legacy_plaintext_reads},
+        )
+    await db.commit()
+    return pages
 
 
 @router.get("/{workspace_id}/review-summary", response_model=WorkspaceReviewSummaryResponse)
@@ -271,20 +417,17 @@ async def generate_workspace_review_pack(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    workspace = await get_workspace_for_user(db, current_user, workspace_id)
-    session = await get_or_create_workspace_session(db, workspace)
-    await touch_workspace_opened(workspace)
-    pkg = await generate_export(db, session.id)
-    if format == "json":
-        return pkg
-    from app.routers.export import _build_csv_response
-    return _build_csv_response(session.id, pkg)
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy workspace review-pack route disabled. Use /api/workspaces/{workspace_id}/review-pack/generate.",
+    )
 
 
 @router.post("/{workspace_id}/review-pack/generate", response_model=WorkspaceExportRecord)
 async def generate_workspace_encrypted_review_pack(
     workspace_id: str,
     payload: WorkspaceExportGenerateRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -299,6 +442,22 @@ async def generate_workspace_encrypted_review_pack(
     workspace = await get_workspace_for_user(db, current_user, workspace_id)
     session = await get_or_create_workspace_session(db, workspace)
     await touch_workspace_opened(workspace)
+    capability_token = get_request_token(request)
+    _u, auth_session = await resolve_session(db, capability_token)
+    export_job = await create_job(
+        db=db,
+        session_id=session.id,
+        document_id=None,
+        job_type="export",
+        workspace_id=workspace_id,
+        user_id=current_user.id,
+        requires_encryption=True,
+        capability_token=capability_token,
+        capability_expires_at=auth_session.expires_at if auth_session else None,
+        payload={"stage": "review_pack_generation"},
+    )
+    await update_job_status(db, export_job["id"], "running", progress=0.2, progress_message="Preparing encrypted review pack")
+    await db.commit()
 
     try:
         record = await generate_encrypted_review_pack(
@@ -310,15 +469,22 @@ async def generate_workspace_encrypted_review_pack(
             blocking_reasons=summary.blocking_reasons,
         )
     except ValueError as exc:
+        await update_job_status(db, export_job["id"], "failed", error_message="Export generation blocked")
+        await db.commit()
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        await update_job_status(db, export_job["id"], "failed", error_message="Export generation failed")
+        await db.commit()
+        raise
 
     await write_audit(
         db,
         "export_package",
         record.id,
         "encrypted_review_pack_generated",
-        details={"workspace_id": workspace_id, "export_id": record.id, "encrypted": True},
+        details={"workspace_id": workspace_id, "export_id": record.id, "encrypted": True, "job_id": export_job["id"]},
     )
+    await update_job_status(db, export_job["id"], "succeeded", progress=1.0, progress_message="Encrypted review pack generated", result_summary=f'{{"export_id":"{record.id}"}}')
     await db.commit()
     await db.refresh(record)
     return record

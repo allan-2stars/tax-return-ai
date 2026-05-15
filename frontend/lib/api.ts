@@ -362,6 +362,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  authRecoverReset: (data: { recovery_key: string; new_master_password: string }) =>
+    request<AuthSessionState>("/api/auth/recover-reset", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   authLogout: () =>
     request<{ ok: boolean }>("/api/auth/logout", {
       method: "POST",

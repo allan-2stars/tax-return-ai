@@ -1,4 +1,4 @@
-.PHONY: up down logs backend-shell frontend-shell test test-auth migrate revision verify lint format cleanup-exports
+.PHONY: up down logs backend-shell frontend-shell test test-auth migrate revision verify lint format cleanup-exports encrypt-backfill-dry-run encrypt-backfill
 
 # Detect docker compose command (v2 vs v1)
 DC = $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
@@ -71,6 +71,12 @@ export-demo:
 
 cleanup-exports:
 	./.venv/bin/python scripts/cleanup_exports.py
+
+encrypt-backfill-dry-run:
+	./.venv/bin/python scripts/backfill_encrypt_sensitive_fields.py --dry-run --confirm
+
+encrypt-backfill:
+	./.venv/bin/python scripts/backfill_encrypt_sensitive_fields.py --confirm
 
 # ── Verification (lint + schema + tests) ──────────────────────────────────────
 verify: lint validate-schema test test-frontend

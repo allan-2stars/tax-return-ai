@@ -20,10 +20,19 @@ from app.models.document import Document
 from app.models.tax_item import TaxItem
 from app.models.document_item import DocumentItem
 from app.models.document_page import DocumentPage
+from app.models.tax_session import TaxSession
+from app.models.tax_workspace import TaxWorkspace
 from app.services.audit.writer import write_audit
 from app.ocr.dispatch import extract_text
 from app.config import settings
 from app.repositories.job_repo import JobRepository
+from app.services.security.key_cache import get_user_active_key
+from app.services.security.field_encryption import (
+    encrypt_text,
+    ENCRYPTION_VERSION,
+    DEFAULT_KEY_VERSION,
+    EncryptionKeyUnavailableError,
+)
 
 
 @dataclass
@@ -155,13 +164,39 @@ async def _run_ocr_pipeline(
                                  progress_message="Extracting text...")
 
     ocr_result = await extract_text(file_data, mime_type)
+    field_key = await _get_session_field_key(db, doc.session_id)
+    if not field_key:
+        await write_audit(
+            db,
+            "document",
+            doc.id,
+            "encryption_key_missing",
+            details={"stage": "ocr_write", "session_id": doc.session_id},
+        )
+        await write_audit(
+            db,
+            "document",
+            doc.id,
+            "encrypted_write_blocked",
+            details={"field": "document_pages.text", "reason": "missing_key"},
+        )
+        await job_repo.update_status(
+            job_id,
+            "failed",
+            error_message="Workspace encryption key unavailable. Unlock and retry.",
+            result_summary='{"status":"failed","reason":"encryption_key_unavailable"}',
+        )
+        raise EncryptionKeyUnavailableError("Workspace encryption key unavailable")
 
     # Store per-page results
     for page in ocr_result.pages:
         page_record = DocumentPage(
             document_id=doc.id,
             page_number=page.page_number,
-            text=page.text,
+            text=None,
+            text_enc=encrypt_text(page.text, field_key),
+            encryption_version=ENCRYPTION_VERSION if page.text else None,
+            key_version=DEFAULT_KEY_VERSION if page.text else None,
             confidence=page.confidence,
             ocr_method=ocr_result.method,
         )
@@ -268,3 +303,15 @@ async def _run_classification(
                                      error_message=f"Classification failed: {exc}",
                                      result_summary='{"status": "classification_failed"}')
         raise  # Re-raise so run_job_sync catches it and doesn't overwrite with "succeeded"
+
+
+async def _get_session_field_key(db: AsyncSession, session_id: str) -> bytes | None:
+    result = await db.execute(
+        select(TaxWorkspace.user_id)
+        .join(TaxSession, TaxSession.workspace_id == TaxWorkspace.id)
+        .where(TaxSession.id == session_id)
+    )
+    user_id = result.scalar_one_or_none()
+    if not user_id:
+        return None
+    return get_user_active_key(user_id)

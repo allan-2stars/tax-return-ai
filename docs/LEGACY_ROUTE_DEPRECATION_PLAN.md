@@ -3,28 +3,27 @@
 ## Purpose
 Phase out session-first and legacy export APIs in favor of authenticated workspace-first routes.
 
-## Legacy Route Inventory
-| Legacy route | Current behavior | Risk | Replacement |
-|---|---|---|---|
-| `GET /api/export/{session_id}` | Generates legacy JSON/CSV export | High (legacy pathway) | `POST /api/workspaces/{workspace_id}/review-pack/generate` |
-| `GET /api/export/{session_id}/history` | Lists session export history | Medium | `GET /api/workspaces/{workspace_id}/review-pack` |
-| `POST /api/export/workspaces/{workspace_id}/review-pack` | Legacy bridge to old export | High | `POST /api/workspaces/{workspace_id}/review-pack/generate` |
-| Session-first item/document routes without workspace prefix | Older access pattern | Medium | `/api/workspaces/{workspace_id}/...` |
+## Current State (Phase 9)
+- Legacy APIs are actively disabled with `410 Gone` via `app/routers/legacy.py`.
+- Workspace-first routes under `/api/workspaces/*` are the supported API surface.
 
-## Current Control State
-- Legacy export routes are gated by `ENABLE_LEGACY_EXPORT_ROUTES`.
-- When disabled, endpoints return `410 Gone`.
+## Route Matrix
+| Legacy route family | Status | Replacement |
+|---|---|---|
+| `/api/export/*` | Disabled (`410 Gone`) | `/api/workspaces/{workspace_id}/review-pack/*` |
+| `/api/sessions/*` | Disabled (`410 Gone`) | `/api/workspaces` + scoped workflow endpoints |
+| `/api/documents/*` | Disabled (`410 Gone`) | `/api/workspaces/{workspace_id}/documents*` |
+| `/api/items/*` | Disabled (`410 Gone`) | `/api/workspaces/{workspace_id}/items*` |
+| `/api/compliance/*` | Disabled (`410 Gone`) | `/api/workspaces/{workspace_id}/issues` |
+| `POST /api/workspaces/{workspace_id}/review-pack` (legacy JSON/CSV) | Disabled (`410 Gone`) | `POST /api/workspaces/{workspace_id}/review-pack/generate` |
 
-## Planned Removal
-1. Phase 8: Keep env-flag lockdown, publish migration guidance.
-2. Phase 9: Frontend fully removes legacy calls.
-3. Phase 10: Remove legacy export router handlers and tests.
-4. Phase 10+: Remove compatibility bridge helpers once no live dependency remains.
-
-## Migration Risks
-- External scripts still calling `/api/export/*`.
-- Historical workflows that assume session IDs only.
+## Risks
+- Any external script still calling legacy endpoints will fail fast with `410`.
+- Legacy UI page `/session/[id]` remains in code and should be removed once not needed.
 
 ## Mitigations
-- Keep explicit `410` response message with replacement route guidance.
-- Maintain workspace-first API docs and integration tests.
+- Consistent `410` error messages point to workspace-first replacements.
+- Workspace-first integration tests remain in required CI/test matrix.
+
+## Planned Next Step
+- Phase 10: remove obsolete legacy router modules and stale legacy frontend page/components after dependency confirmation.
