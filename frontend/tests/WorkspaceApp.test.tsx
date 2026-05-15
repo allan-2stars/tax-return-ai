@@ -22,6 +22,7 @@ vi.mock('@/lib/api', () => ({
     workspaceReviewPackDownloadUrl: vi.fn(),
     deleteWorkspaceReviewPack: vi.fn(),
     listWorkspaceAuditEvents: vi.fn(),
+    getWorkspaceSecurityStatus: vi.fn(),
   },
 }));
 
@@ -33,6 +34,22 @@ describe('WorkspaceApp API-backed states', () => {
     apiMock.authLogout.mockResolvedValue({ ok: true });
     apiMock.listWorkspaceReviewPacks.mockResolvedValue([]);
     apiMock.listWorkspaceAuditEvents.mockResolvedValue([]);
+    apiMock.getWorkspaceSecurityStatus.mockResolvedValue({
+      encryption_enabled: 'field_level_partial',
+      export_encryption_enabled: true,
+      session_status: 'UNLOCKED',
+      recovery_key_configured: true,
+      last_unlock_at: null,
+      plaintext_readiness: {
+        document_pages: { total_rows: 0, plaintext_only_rows: 0, encrypted_rows: 0, mixed_rows: 0, migration_completion_percent: 100 },
+        tax_items: { total_rows: 0, plaintext_only_rows: 0, encrypted_rows: 0, mixed_rows: 0, migration_completion_percent: 100 },
+        classification_results: { total_rows: 0, plaintext_only_rows: 0, encrypted_rows: 0, mixed_rows: 0, migration_completion_percent: 100 },
+        overall_migration_completion_percent: 100,
+      },
+      migration_readiness: { can_disable_plaintext_fallback: true, blocking_tables: [], legacy_read_paths: [] },
+      operational_visibility: { backup_status: 'manual_runbook', locked_write_counter: 0, failed_unlock_counter: 0, capability_metrics: {} },
+      recent_security_events: [],
+    });
     apiMock.workspaceReviewPackDownloadUrl.mockImplementation((workspaceId: string, exportId: string) => `/api/workspaces/${workspaceId}/review-pack/${exportId}/download`);
   });
 
@@ -348,5 +365,21 @@ describe('WorkspaceApp API-backed states', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Lock Workspace' }));
     expect(apiMock.authLogout).toHaveBeenCalledTimes(1);
     expect(await screen.findByText('Unlock Workspace')).toBeInTheDocument();
+  });
+
+  it('renders security status in settings panel', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    expect(await screen.findByTestId('security-settings-panel')).toBeInTheDocument();
+    expect(screen.getByText(/Plaintext Migration Progress/)).toBeInTheDocument();
   });
 });

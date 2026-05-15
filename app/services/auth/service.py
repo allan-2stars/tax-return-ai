@@ -216,6 +216,13 @@ async def verify_unlock(db: AsyncSession, master_password: str, request: Request
 
     candidate_hash = hash_secret_for_kdf(master_password, user.password_salt, user.password_kdf)
     if not hmac.compare_digest(candidate_hash, user.password_hash):
+        await write_audit(
+            db,
+            "user",
+            user.id,
+            "unlock_failed",
+            details={"reason": "invalid_master_password"},
+        )
         raise PermissionError("Invalid master password")
 
     user.last_unlocked_at = datetime.now(timezone.utc)

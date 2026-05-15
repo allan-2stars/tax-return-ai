@@ -311,6 +311,44 @@ export interface WorkspaceAuditEvent {
   created_at: string;
 }
 
+export interface PlaintextTableReadiness {
+  total_rows: number;
+  plaintext_only_rows: number;
+  encrypted_rows: number;
+  mixed_rows: number;
+  migration_completion_percent: number;
+}
+
+export interface WorkspaceSecurityStatus {
+  encryption_enabled: string;
+  export_encryption_enabled: boolean;
+  session_status: string;
+  recovery_key_configured: boolean;
+  last_unlock_at: string | null;
+  plaintext_readiness: {
+    document_pages: PlaintextTableReadiness;
+    tax_items: PlaintextTableReadiness;
+    classification_results: PlaintextTableReadiness;
+    overall_migration_completion_percent: number;
+  };
+  migration_readiness: {
+    can_disable_plaintext_fallback: boolean;
+    blocking_tables: string[];
+    legacy_read_paths: string[];
+  };
+  operational_visibility: {
+    backup_status: string;
+    locked_write_counter: number;
+    failed_unlock_counter: number;
+    capability_metrics: Record<string, number>;
+  };
+  recent_security_events: Array<{
+    action: string;
+    created_at: string;
+    entity_type: string;
+  }>;
+}
+
 // ── Request helpers ───────────────────────────────────────────────────────────
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -420,6 +458,8 @@ export const api = {
     request<WorkspaceAuditEvent[]>(
       `/api/workspaces/${workspaceId}/audit-events?limit=${limit}&offset=${offset}`
     ),
+  getWorkspaceSecurityStatus: (workspaceId: string) =>
+    request<WorkspaceSecurityStatus>(`/api/workspaces/${workspaceId}/security/status`),
 
   // ── Sessions ──────────────────────────────────────────────────────────────
   /** GET /api/sessions */

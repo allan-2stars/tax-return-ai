@@ -17,6 +17,7 @@
 
 ## Database and Storage
 - [x] Field-level encryption-at-rest is partially implemented for selected sensitive text fields.
+- [x] Plaintext migration readiness reporting is available per sensitive table.
 - [ ] Full database encryption-at-rest is not implemented yet.
 - [x] Documents and exports stay on local storage by default.
 - [ ] Secure file deletion guarantees are limited by filesystem behavior.

@@ -16,6 +16,7 @@ from app.models.tax_item import TaxItem
 from app.models.user import User
 from app.models.tax_workspace import TaxWorkspace
 from app.models.audit_log import AuditLog
+from app.models.classification_result import ClassificationResultModel
 from app.schemas.workspace import WorkspaceCreateRequest, WorkspaceResponse
 from app.schemas.document import DocumentPageResponse
 from app.services.auth.service import seed_default_workspaces
@@ -30,9 +31,21 @@ from app.services.job import create_job, update_job_status
 from app.services.security.key_cache import get_session_key
 from app.services.security.field_encryption import decrypt_text, is_encrypted
 from app.db.auth_deps import get_request_token
+from app.services.security.unlock_capability import get_capability_metrics
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 VALID_REVIEW_STATUSES = {"draft", "needs_review", "confirmed", "excluded", "tax_agent_review"}
+SECURITY_EVENT_ACTIONS = {
+    "workspace_locked",
+    "workspace_unlocked",
+    "auto_lock_triggered",
+    "session_expired",
+    "recovery_reset_completed",
+    "invalid_session_token",
+    "unlock_failed",
+    "encryption_key_missing",
+    "encrypted_write_blocked",
+}
 
 
 def _safe_audit_details(details: str | None) -> str | None:
@@ -112,6 +125,44 @@ def _decrypt_item_fields(item: TaxItem, key: bytes) -> None:
         item.notes = decrypt_text(item.notes_enc, key)
     if getattr(item, "review_reason_enc", None):
         item.review_reason = decrypt_text(item.review_reason_enc, key)
+
+
+async def _field_plaintext_stats(
+    db: AsyncSession,
+    model,
+    plain_field: str,
+    enc_field: str,
+    session_id: str | None = None,
+) -> dict:
+    result = await db.execute(select(model))
+    rows = result.scalars().all()
+    if session_id is not None:
+        rows = [r for r in rows if getattr(r, "session_id", None) == session_id]
+    total = len(rows)
+    plaintext_only = 0
+    encrypted_only = 0
+    mixed = 0
+    neither = 0
+    for row in rows:
+        has_plain = bool(getattr(row, plain_field, None))
+        has_enc = bool(getattr(row, enc_field, None))
+        if has_plain and has_enc:
+            mixed += 1
+        elif has_plain and not has_enc:
+            plaintext_only += 1
+        elif has_enc and not has_plain:
+            encrypted_only += 1
+        else:
+            neither += 1
+    completion = 100.0 if total == 0 else round(((encrypted_only + mixed) / total) * 100.0, 2)
+    return {
+        "total_rows": total,
+        "plaintext_only_rows": plaintext_only,
+        "encrypted_rows": encrypted_only,
+        "mixed_rows": mixed,
+        "empty_rows": neither,
+        "migration_completion_percent": completion,
+    }
 
 
 @router.get("", response_model=list[WorkspaceResponse])
@@ -618,6 +669,94 @@ async def cleanup_workspace_review_pack_files(
         "deleted_file_count": result.deleted_file_count,
         "skipped_missing_file_count": result.skipped_missing_file_count,
         "marked_deleted_count": result.marked_deleted_count,
+    }
+
+
+@router.get("/{workspace_id}/security/status")
+async def workspace_security_status(
+    workspace_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_unlocked_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+
+    doc_stats = await _field_plaintext_stats(db, DocumentPage, "text", "text_enc")
+    item_desc = await _field_plaintext_stats(db, TaxItem, "description", "description_enc", session_id=session.id)
+    class_in = await _field_plaintext_stats(db, ClassificationResultModel, "raw_input", "raw_input_enc", session_id=session.id)
+    class_out = await _field_plaintext_stats(db, ClassificationResultModel, "raw_output", "raw_output_enc", session_id=session.id)
+    classification_stats = {
+        "total_rows": class_in["total_rows"],
+        "plaintext_only_rows": class_in["plaintext_only_rows"] + class_out["plaintext_only_rows"],
+        "encrypted_rows": class_in["encrypted_rows"] + class_out["encrypted_rows"],
+        "mixed_rows": class_in["mixed_rows"] + class_out["mixed_rows"],
+        "migration_completion_percent": round(
+            (class_in["migration_completion_percent"] + class_out["migration_completion_percent"]) / 2.0, 2
+        ),
+    }
+    table_completion = [
+        doc_stats["migration_completion_percent"],
+        item_desc["migration_completion_percent"],
+        classification_stats["migration_completion_percent"],
+    ]
+    overall_completion = round(sum(table_completion) / len(table_completion), 2)
+    blocking_tables = []
+    if doc_stats["plaintext_only_rows"] > 0:
+        blocking_tables.append("document_pages")
+    if item_desc["plaintext_only_rows"] > 0:
+        blocking_tables.append("tax_items")
+    if classification_stats["plaintext_only_rows"] > 0:
+        blocking_tables.append("classification_results")
+
+    audit_summary = await db.execute(
+        select(AuditLog.action).where(
+            AuditLog.action.in_(["encrypted_write_blocked", "unlock_failed", "workspace_locked", "workspace_unlocked"])
+        )
+    )
+    actions = [row[0] for row in audit_summary.all()]
+    recent_sec_events = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.action.in_(list(SECURITY_EVENT_ACTIONS)))
+        .order_by(AuditLog.created_at.desc())
+        .limit(12)
+    )
+    recent = recent_sec_events.scalars().all()
+    return {
+        "encryption_enabled": "field_level_partial",
+        "export_encryption_enabled": True,
+        "session_status": "UNLOCKED",
+        "recovery_key_configured": bool(current_user.recovery_key_hash),
+        "last_unlock_at": current_user.last_unlocked_at.isoformat() if current_user.last_unlocked_at else None,
+        "plaintext_readiness": {
+            "document_pages": doc_stats,
+            "tax_items": item_desc,
+            "classification_results": classification_stats,
+            "overall_migration_completion_percent": overall_completion,
+        },
+        "migration_readiness": {
+            "can_disable_plaintext_fallback": len(blocking_tables) == 0,
+            "blocking_tables": blocking_tables,
+            "legacy_read_paths": [
+                "workspaces.list_workspace_items",
+                "workspaces.list_workspace_document_pages",
+                "classification_results legacy plaintext fallback",
+            ],
+        },
+        "operational_visibility": {
+            "backup_status": "manual_runbook",
+            "locked_write_counter": actions.count("encrypted_write_blocked"),
+            "failed_unlock_counter": actions.count("unlock_failed"),
+            "capability_metrics": get_capability_metrics(),
+        },
+        "recent_security_events": [
+            {
+                "action": row.action,
+                "created_at": row.created_at,
+                "entity_type": row.entity_type,
+            }
+            for row in recent
+        ],
     }
 
 

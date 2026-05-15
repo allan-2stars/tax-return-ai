@@ -11,6 +11,7 @@ import {
   type WorkspaceExportRecord,
   type WorkspaceAuditEvent,
   type WorkspaceReviewSummary,
+  type WorkspaceSecurityStatus,
 } from "@/lib/api";
 
 type NavItem = "Dashboard" | "Documents" | "Review Items" | "Issues" | "Review Pack" | "Settings";
@@ -47,6 +48,9 @@ export function WorkspaceApp() {
   const [confirmExportPassword, setConfirmExportPassword] = useState("");
   const [exportHistory, setExportHistory] = useState<WorkspaceExportRecord[]>([]);
   const [auditEvents, setAuditEvents] = useState<WorkspaceAuditEvent[]>([]);
+  const [securityStatus, setSecurityStatus] = useState<WorkspaceSecurityStatus | null>(null);
+  const [recoveryCopied, setRecoveryCopied] = useState(false);
+  const [resetSuccessMessage, setResetSuccessMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const init = async () => {
@@ -134,6 +138,18 @@ export function WorkspaceApp() {
         setReviewSummary(summary);
       } catch {
         setReviewSummary(null);
+      }
+    })();
+  }, [authState, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
+    void (async () => {
+      try {
+        const status = await api.getWorkspaceSecurityStatus(selectedWorkspaceId);
+        setSecurityStatus(status);
+      } catch {
+        setSecurityStatus(null);
       }
     })();
   }, [authState, selectedWorkspaceId]);
@@ -263,6 +279,37 @@ export function WorkspaceApp() {
           <div className="space-y-3">
             <p className="text-sm text-slate-600">Recovery Key (show once):</p>
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-800">{recoveryKey}</div>
+            <p className="text-xs text-amber-700">
+              Store this key offline. Losing both master password and recovery key permanently loses encrypted data access.
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm"
+                onClick={async () => {
+                  await navigator.clipboard.writeText(recoveryKey);
+                  setRecoveryCopied(true);
+                }}
+              >
+                Copy Key
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm"
+                onClick={() => {
+                  const blob = new Blob([`Tax Return AI Recovery Key\n${recoveryKey}\n`], { type: "text/plain;charset=utf-8" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "tax-return-ai-recovery-key.txt";
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                Download Key
+              </button>
+            </div>
+            {recoveryCopied && <p className="text-xs text-slate-500">Recovery key copied.</p>}
             <button className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm" onClick={() => setSetupStep("confirm_key")}>
               I saved it
             </button>
@@ -347,6 +394,7 @@ export function WorkspaceApp() {
                 });
                 if (session.is_authenticated || session.app_state === "UNLOCKED") {
                   setMessage(null);
+                  setResetSuccessMessage("Password reset complete. Keep your recovery key safe for future resets.");
                   setAuthState("UNLOCKED");
                   localStorage.setItem(AUTH_EVENT_KEY, "unlocked");
                 }
@@ -451,6 +499,11 @@ export function WorkspaceApp() {
             {message}
           </div>
         )}
+        {resetSuccessMessage && (
+          <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+            {resetSuccessMessage}
+          </div>
+        )}
 
         {activeNav === "Dashboard" && (
           <div className="space-y-3" data-testid="guided-steps">
@@ -542,6 +595,8 @@ export function WorkspaceApp() {
         {activeNav === "Review Pack" && (
           <div className="space-y-2 text-sm text-slate-600" data-testid="review-pack-panel">
             <p>Encrypted review pack is {reviewSummary?.ready_for_export ? "ready" : "not ready"}.</p>
+            <p className="text-xs text-slate-500">This export is for human review and evidence handoff, not tax lodgement.</p>
+            <p className="text-xs text-slate-500">Verify downloaded file checksum against the SHA-256 listed below.</p>
             {!reviewSummary?.ready_for_export &&
               (reviewSummary?.blocking_reasons?.length ? (
                 <ul className="list-disc pl-5 text-xs text-slate-500">
@@ -616,6 +671,17 @@ export function WorkspaceApp() {
                     <p className="text-slate-500">
                       {e.file_size ?? 0} bytes · sha256 {e.sha256 ? `${e.sha256.slice(0, 12)}...` : "n/a"} · {e.kdf ?? "kdf-n/a"}
                     </p>
+                    {e.sha256 && (
+                      <button
+                        className="mt-1 rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(e.sha256 ?? "");
+                          setMessage("Checksum copied for local verification.");
+                        }}
+                      >
+                        Copy checksum
+                      </button>
+                    )}
                     {e.downloaded_at && <p className="text-slate-500">Downloaded: {e.downloaded_at}</p>}
                   </div>
                   <div className="flex gap-2">
@@ -644,7 +710,42 @@ export function WorkspaceApp() {
           </div>
         )}
 
-        {activeNav !== "Dashboard" && activeNav !== "Review Items" && activeNav !== "Issues" && activeNav !== "Review Pack" && (
+        {activeNav === "Settings" && (
+          <div className="space-y-3" data-testid="security-settings-panel">
+            <h3 className="text-sm font-semibold text-slate-800">Security Status</h3>
+            {!securityStatus && <p className="text-xs text-slate-500">Security status unavailable.</p>}
+            {securityStatus && (
+              <>
+                <article className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                  <p>Field encryption: {securityStatus.encryption_enabled}</p>
+                  <p>Export encryption: {securityStatus.export_encryption_enabled ? "enabled" : "disabled"}</p>
+                  <p>Session state: {securityStatus.session_status}</p>
+                  <p>Recovery key configured: {securityStatus.recovery_key_configured ? "yes" : "no"}</p>
+                  <p>Last unlock activity: {securityStatus.last_unlock_at ?? "n/a"}</p>
+                </article>
+                <article className="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
+                  <p className="font-semibold text-slate-700">Plaintext Migration Progress</p>
+                  <p>Overall completion: {securityStatus.plaintext_readiness.overall_migration_completion_percent}%</p>
+                  <p>Document pages: {securityStatus.plaintext_readiness.document_pages.migration_completion_percent}%</p>
+                  <p>Tax items: {securityStatus.plaintext_readiness.tax_items.migration_completion_percent}%</p>
+                  <p>Classification results: {securityStatus.plaintext_readiness.classification_results.migration_completion_percent}%</p>
+                  <p>
+                    Plaintext fallback retirement:{" "}
+                    {securityStatus.migration_readiness.can_disable_plaintext_fallback ? "ready" : "blocked"}
+                  </p>
+                </article>
+                <article className="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
+                  <p className="font-semibold text-slate-700">Operational Visibility</p>
+                  <p>Backup status: {securityStatus.operational_visibility.backup_status}</p>
+                  <p>Locked write counter: {securityStatus.operational_visibility.locked_write_counter}</p>
+                  <p>Failed unlock counter: {securityStatus.operational_visibility.failed_unlock_counter}</p>
+                </article>
+              </>
+            )}
+          </div>
+        )}
+
+        {activeNav !== "Dashboard" && activeNav !== "Review Items" && activeNav !== "Issues" && activeNav !== "Review Pack" && activeNav !== "Settings" && (
           <div className="space-y-3 text-sm text-slate-600">
             <p>{activeNav} section shell is active. Existing workflow remains available while route protection is phased in.</p>
             <LinkButton href={workspacePath("documents")}>Go to current workflow</LinkButton>
@@ -657,7 +758,7 @@ export function WorkspaceApp() {
         <div className="mt-3 space-y-2 rounded-lg border border-slate-100 bg-slate-50 p-3 text-xs text-slate-600">
           <p>Your documents stay local by default.</p>
           <p>Cloud AI is off unless explicitly enabled.</p>
-          <p>Encrypted exports are planned for review packs.</p>
+          <p>Encrypted review pack exports are enabled.</p>
         </div>
         <div className="mt-4 space-y-2">
           <button
