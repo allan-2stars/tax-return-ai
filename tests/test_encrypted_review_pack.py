@@ -202,9 +202,7 @@ async def test_delete_review_pack(async_client, db_session):
     assert deleted.status_code == 200
     history = await async_client.get(f'/api/workspaces/{workspace_id}/review-pack')
     assert history.status_code == 200
-    rec2 = next(r for r in history.json() if r['id'] == export_id)
-    assert rec2['status'] == 'deleted'
-    assert rec2['filename'] is not None
+    assert all(r['id'] != export_id for r in history.json())
     assert not path.exists()
 
 

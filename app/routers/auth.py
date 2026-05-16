@@ -24,6 +24,8 @@ from app.services.auth.service import (
     recovery_reset_password,
     resolve_session,
     revoke_session,
+    is_unlock_capability_active,
+    lock_session,
 )
 from app.services.security.unlock_capability import get_capability_metrics
 
@@ -197,14 +199,31 @@ async def session_status(
     if not user:
         return SessionResponse(is_authenticated=False, app_state="SESSION_EXPIRED")
 
+    unlocked = False
+    if auth_session:
+        unlocked = await is_unlock_capability_active(db, user, auth_session, token)
     expires_at = auth_session.expires_at.astimezone(timezone.utc).isoformat() if auth_session else None
     return SessionResponse(
         is_authenticated=True,
-        app_state="UNLOCKED",
+        app_state="UNLOCKED" if unlocked else "LOCKED",
         user_id=user.id,
         display_name=user.display_name,
         expires_at=expires_at,
     )
+
+
+@router.post("/lock")
+async def lock_auth(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    token = request.cookies.get(COOKIE_NAME)
+    auth_header = request.headers.get("authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    await lock_session(db, token)
+    await db.commit()
+    return {"ok": True}
 
 
 @router.get("/capability-health")

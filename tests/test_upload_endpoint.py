@@ -39,7 +39,7 @@ class TestUploadEndpoint:
         assert data["job_type"] in {"ingestion", "ingestion_pipeline"}
         assert data["job_status"] in {"queued", "running", "succeeded"}
 
-    async def test_upload_detects_duplicate(self, async_client):
+    async def test_upload_blocks_exact_duplicate(self, async_client):
         workspace_id = await self._create_workspace(async_client)
         file_content = b"duplicate content"
 
@@ -54,8 +54,49 @@ class TestUploadEndpoint:
             f"/api/workspaces/{workspace_id}/documents/upload",
             files={"file": ("renamed.txt", io.BytesIO(file_content), "text/plain")},
         )
-        assert resp2.status_code == 202
-        assert resp2.json()["document_id"] != first_doc_id
+        assert resp2.status_code == 409
+        payload = resp2.json()["detail"]
+        assert payload["code"] == "duplicate_file"
+        assert payload["retryable"] is False
+        assert payload["existing_document"]["id"] == first_doc_id
+
+    async def test_upload_same_filename_different_hash_allowed(self, async_client):
+        workspace_id = await self._create_workspace(async_client)
+
+        first = await async_client.post(
+            f"/api/workspaces/{workspace_id}/documents/upload",
+            files={"file": ("same.pdf", io.BytesIO(b"first"), "application/pdf")},
+        )
+        assert first.status_code == 202
+
+        second = await async_client.post(
+            f"/api/workspaces/{workspace_id}/documents/upload",
+            files={"file": ("same.pdf", io.BytesIO(b"second"), "application/pdf")},
+        )
+        assert second.status_code == 202
+
+    async def test_duplicate_upload_does_not_create_new_job(self, async_client):
+        workspace_id = await self._create_workspace(async_client)
+        file_content = b"duplicate content"
+        resp1 = await async_client.post(
+            f"/api/workspaces/{workspace_id}/documents/upload",
+            files={"file": ("original.txt", io.BytesIO(file_content), "text/plain")},
+        )
+        assert resp1.status_code == 202
+
+        docs_before = await async_client.get(f"/api/workspaces/{workspace_id}/documents")
+        assert docs_before.status_code == 200
+        count_before = len(docs_before.json())
+
+        resp2 = await async_client.post(
+            f"/api/workspaces/{workspace_id}/documents/upload",
+            files={"file": ("renamed.txt", io.BytesIO(file_content), "text/plain")},
+        )
+        assert resp2.status_code == 409
+
+        docs_after = await async_client.get(f"/api/workspaces/{workspace_id}/documents")
+        assert docs_after.status_code == 200
+        assert len(docs_after.json()) == count_before
 
     async def test_upload_requires_auth(self, async_client):
         resp = await async_client.post(

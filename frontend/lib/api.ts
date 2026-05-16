@@ -9,17 +9,19 @@ export class ApiError extends Error {
   status: number;
   code?: string;
   retryable?: boolean;
+  detail?: unknown;
 
-  constructor(message: string, status: number, code?: string, retryable?: boolean) {
+  constructor(message: string, status: number, code?: string, retryable?: boolean, detail?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.retryable = retryable;
+    this.detail = detail;
   }
 }
 
-function parseApiErrorPayload(raw: unknown): { code?: string; message?: string; retryable?: boolean } {
+function parseApiErrorPayload(raw: unknown): { code?: string; message?: string; retryable?: boolean; detail?: unknown } {
   if (raw && typeof raw === "object") {
     const detail = (raw as { detail?: unknown }).detail;
     if (detail && typeof detail === "object") {
@@ -27,12 +29,14 @@ function parseApiErrorPayload(raw: unknown): { code?: string; message?: string; 
         code: (detail as { code?: string }).code,
         message: (detail as { message?: string }).message,
         retryable: (detail as { retryable?: boolean }).retryable,
+        detail,
       };
     }
     return {
       code: (raw as { code?: string }).code,
       message: (raw as { message?: string }).message,
       retryable: (raw as { retryable?: boolean }).retryable,
+      detail: raw,
     };
   }
   return {};
@@ -408,7 +412,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       parsed.message || `Request failed (${res.status}).`,
       res.status,
       parsed.code,
-      parsed.retryable
+      parsed.retryable,
+      parsed.detail
     );
   }
   if (res.status === 204) return undefined as T;
@@ -437,7 +442,8 @@ async function uploadFile(
       parsed.message || `Upload failed (${res.status}).`,
       res.status,
       parsed.code,
-      parsed.retryable
+      parsed.retryable,
+      parsed.detail
     );
   }
   return res.json() as Promise<UploadResponse>;
@@ -478,7 +484,8 @@ function uploadFileWithProgress(
           parsed.message || `Upload failed (${xhr.status}).`,
           xhr.status,
           parsed.code,
-          parsed.retryable
+          parsed.retryable,
+          parsed.detail
         )
       );
     };
@@ -515,8 +522,19 @@ export const api = {
     request<{ ok: boolean }>("/api/auth/logout", {
       method: "POST",
     }),
+  authLock: () =>
+    request<{ ok: boolean }>("/api/auth/lock", {
+      method: "POST",
+    }),
   authLogoutKeepalive: async () => {
     await fetch(`${BASE_URL}/api/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+      keepalive: true,
+    });
+  },
+  authLockKeepalive: async () => {
+    await fetch(`${BASE_URL}/api/auth/lock`, {
       method: "POST",
       credentials: "include",
       keepalive: true,
@@ -573,6 +591,33 @@ export const api = {
     request<WorkspaceExportRecord[]>(`/api/workspaces/${workspaceId}/review-pack`),
   workspaceReviewPackDownloadUrl: (workspaceId: string, exportId: string) =>
     `${BASE_URL}/api/workspaces/${workspaceId}/review-pack/${exportId}/download`,
+  downloadWorkspaceReviewPack: async (workspaceId: string, exportId: string) => {
+    const response = await fetch(`${BASE_URL}/api/workspaces/${workspaceId}/review-pack/${exportId}/download`, {
+      method: "GET",
+      credentials: "include",
+    });
+    if (!response.ok) {
+      let payload: unknown = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      const parsed = parseApiErrorPayload(payload);
+      throw new ApiError(
+        parsed.message || `Download failed (${response.status})`,
+        response.status,
+        parsed.code,
+        parsed.retryable,
+        parsed.detail
+      );
+    }
+    const blob = await response.blob();
+    const contentDisposition = response.headers.get("content-disposition") || "";
+    const match = /filename=\"?([^\";]+)\"?/i.exec(contentDisposition);
+    const filename = match?.[1] ?? `tax-review-pack-${exportId}.enc.zip`;
+    return { blob, filename };
+  },
   deleteWorkspaceReviewPack: (workspaceId: string, exportId: string) =>
     request<{ ok: boolean }>(`/api/workspaces/${workspaceId}/review-pack/${exportId}`, {
       method: "DELETE",

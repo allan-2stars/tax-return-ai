@@ -131,6 +131,29 @@ async def upload_document(
     import hashlib
     file_hash = hashlib.sha256(file_data).hexdigest()
 
+    existing_result = await db.execute(
+        select(Document).where(
+            Document.session_id == session_id,
+            Document.file_hash == file_hash,
+        ).order_by(Document.created_at.asc())
+    )
+    existing_doc = existing_result.scalars().first()
+    if existing_doc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "duplicate_file",
+                "message": "This document was already uploaded.",
+                "retryable": False,
+                "existing_document": {
+                    "id": existing_doc.id,
+                    "original_filename": existing_doc.original_filename,
+                    "created_at": existing_doc.created_at.isoformat(),
+                    "status": existing_doc.status,
+                },
+            },
+        )
+
     doc = Document(
         session_id=session_id,
         original_filename=file.filename or "unknown",

@@ -469,3 +469,25 @@ async def is_unlock_capability_active(
 ) -> bool:
     token_hash = _sha256_hex(token)
     return await validate_unlock_capability(db, user, auth_session, token_hash, touch=True)
+
+
+async def lock_session(db: AsyncSession, token: str | None) -> bool:
+    if not token:
+        return False
+    token_hash = _sha256_hex(token)
+    result = await db.execute(select(AuthSession).where(AuthSession.session_token_hash == token_hash))
+    auth_session = result.scalar_one_or_none()
+    if not auth_session:
+        return False
+    await revoke_capability_for_session(db, auth_session.session_token_hash)
+    clear_session_key(token)
+    clear_session_key_by_hash(auth_session.session_token_hash)
+    await write_audit(
+        db,
+        "user",
+        auth_session.user_id,
+        "workspace_locked",
+        details={"reason": "manual_lock"},
+    )
+    await db.flush()
+    return True

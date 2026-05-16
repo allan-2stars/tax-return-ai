@@ -133,6 +133,24 @@ async def test_logout_clears_cached_key(async_client):
     assert get_session_key(token) is None
 
 
+async def test_lock_keeps_auth_but_requires_unlock(async_client):
+    setup = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+    assert setup.status_code == 200
+    token = async_client.cookies.get('taxai_session')
+    assert get_session_key(token) is not None
+
+    lock = await async_client.post('/api/auth/lock')
+    assert lock.status_code == 200
+    assert lock.json()["ok"] is True
+    assert get_session_key(token) is None
+
+    sess = await async_client.get('/api/auth/session')
+    assert sess.status_code == 200
+    data = sess.json()
+    assert data["is_authenticated"] is True
+    assert data["app_state"] == "LOCKED"
+
+
 async def test_production_cookie_security_flags(async_client):
     old_secure = settings.cookie_secure
     old_samesite = settings.cookie_samesite

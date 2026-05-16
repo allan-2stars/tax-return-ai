@@ -618,7 +618,11 @@ async def list_workspace_review_pack_history(
     await touch_workspace_opened(workspace)
     result = await db.execute(
         select(ExportPackageModel)
-        .where(ExportPackageModel.workspace_id == workspace_id)
+        .where(
+            ExportPackageModel.workspace_id == workspace_id,
+            ExportPackageModel.status != "deleted",
+            ExportPackageModel.storage_path.is_not(None),
+        )
         .order_by(ExportPackageModel.created_at.desc())
     )
     return result.scalars().all()

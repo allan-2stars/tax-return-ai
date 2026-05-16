@@ -53,6 +53,18 @@ function toProcessingOutcome(status: string): "uploaded" | "extracting" | "class
   return "uploaded";
 }
 
+function outcomeLabel(status: string): string {
+  const outcome = toProcessingOutcome(status);
+  if (outcome === "duplicate_detected") return "Duplicate";
+  if (outcome === "needs_review") return "Needs Review";
+  if (outcome === "uploaded") return "Uploaded";
+  if (outcome === "extracting") return "Extracting";
+  if (outcome === "classifying") return "Classifying";
+  if (outcome === "classified") return "Classified";
+  if (outcome === "failed") return "Failed";
+  return "Uploaded";
+}
+
 function validateMasterPassword(password: string): string | null {
   const normalized = password.trim();
   if (normalized.length < 12) return "Use at least 12 characters.";
@@ -69,6 +81,15 @@ function inferItemNature(item: TaxItem): "income/earning" | "expense/cost" | "un
   if (t.includes("deduction") || t.includes("expense") || c.includes("expense") || c.includes("cost") || c.includes("tools")) return "expense/cost";
   return "unknown";
 }
+
+type DuplicateUploadInfo = {
+  existing_document: {
+    id: string;
+    original_filename: string;
+    created_at: string;
+    status: string;
+  };
+};
 
 export function WorkspaceApp() {
   const [authState, setAuthState] = useState<AppAuthState>("UNLOCKING");
@@ -101,6 +122,8 @@ export function WorkspaceApp() {
   const [exportPassword, setExportPassword] = useState("");
   const [confirmExportPassword, setConfirmExportPassword] = useState("");
   const [exportHistory, setExportHistory] = useState<WorkspaceExportRecord[]>([]);
+  const [downloadingExportId, setDownloadingExportId] = useState<string | null>(null);
+  const [deletingExportId, setDeletingExportId] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<WorkspaceAuditEvent[]>([]);
   const [securityStatus, setSecurityStatus] = useState<WorkspaceSecurityStatus | null>(null);
   const [recoveryCopied, setRecoveryCopied] = useState(false);
@@ -116,6 +139,7 @@ export function WorkspaceApp() {
     return Number(window.localStorage.getItem("taxai_idle_timeout_minutes") || 15);
   });
   const [selectedItem, setSelectedItem] = useState<TaxItem | null>(null);
+  const [duplicateUploadInfo, setDuplicateUploadInfo] = useState<DuplicateUploadInfo | null>(null);
 
   const isAllowedUploadFile = (file: File): boolean => {
     const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
@@ -126,6 +150,16 @@ export function WorkspaceApp() {
   const showToast = (text: string) => {
     setToast(text);
     window.setTimeout(() => setToast(null), 2800);
+  };
+
+  const computeFileHash = async (file: File): Promise<string | null> => {
+    try {
+      const buffer = await file.arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", buffer);
+      return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    } catch {
+      return null;
+    }
   };
 
   const refreshReviewData = async (workspaceId: string, filter: ReviewFilter) => {
@@ -163,8 +197,7 @@ export function WorkspaceApp() {
           setAuthState(session.app_state === "SESSION_EXPIRED" ? "SESSION_EXPIRED" : "LOCKED");
           return;
         }
-
-        setAuthState("UNLOCKED");
+        setAuthState(session.app_state === "UNLOCKED" ? "UNLOCKED" : "LOCKED");
       } catch {
         setAuthState("LOCKED");
       }
@@ -202,9 +235,9 @@ export function WorkspaceApp() {
   }, [authState]);
 
   useEffect(() => {
-    if (!process.env.NEXT_PUBLIC_LOCK_ON_BROWSER_CLOSE || authState !== "UNLOCKED") return;
+    if (authState !== "UNLOCKED") return;
     const onBeforeUnload = () => {
-      void api.authLogoutKeepalive();
+      void api.authLockKeepalive();
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
@@ -651,7 +684,7 @@ export function WorkspaceApp() {
         <button
           className="mt-4 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
           onClick={async () => {
-            await api.authLogout();
+            await api.authLock();
             setAuthState("LOCKED");
             localStorage.setItem(AUTH_EVENT_KEY, "locked");
           }}
@@ -692,6 +725,33 @@ export function WorkspaceApp() {
         {toast && (
           <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800" data-testid="toast-notification">
             {toast}
+          </div>
+        )}
+        {duplicateUploadInfo && (
+          <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="duplicate-upload-info">
+            <p className="font-medium">This document was already uploaded.</p>
+            <p className="mt-1">
+              Existing: {duplicateUploadInfo.existing_document.original_filename} · {duplicateUploadInfo.existing_document.created_at} · {duplicateUploadInfo.existing_document.status}
+            </p>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700"
+                onClick={() => {
+                  setActiveNav("Documents");
+                  setDuplicateUploadInfo(null);
+                }}
+              >
+                View existing document
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700"
+                onClick={() => setDuplicateUploadInfo(null)}
+              >
+                Cancel upload
+              </button>
+            </div>
           </div>
         )}
         {resetSuccessMessage && (
@@ -765,6 +825,7 @@ export function WorkspaceApp() {
                   setIsDragActive(false);
                   const file = e.dataTransfer.files?.[0];
                   if (!file) return;
+                  setDuplicateUploadInfo(null);
                   if (!isAllowedUploadFile(file)) {
                     setMessage("Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, CSV, TXT.");
                     return;
@@ -780,6 +841,7 @@ export function WorkspaceApp() {
                   type="file"
                   onChange={(e) => {
                     const file = e.target.files?.[0] ?? null;
+                    setDuplicateUploadInfo(null);
                     if (!file) {
                       setUploadFile(null);
                       return;
@@ -812,8 +874,31 @@ export function WorkspaceApp() {
                     }
                     setUploadingDocument(true);
                     setUploadProgress(0);
+                    setDuplicateUploadInfo(null);
                     try {
                       const uploadedFileName = uploadFile.name;
+                      const selectedHash = await computeFileHash(uploadFile);
+                      let sameFilenameWarningShown = false;
+                      const hasSameFilename = documents.some(
+                        (d) => d.original_filename.toLowerCase() === uploadedFileName.toLowerCase()
+                      );
+                      if (hasSameFilename) {
+                        if (!selectedHash) {
+                          showToast("A document with this filename already exists.");
+                          sameFilenameWarningShown = true;
+                        } else {
+                          const sameNameDifferentContent = documents.some(
+                            (d) =>
+                              d.original_filename.toLowerCase() === uploadedFileName.toLowerCase() &&
+                              d.file_hash &&
+                              d.file_hash !== selectedHash
+                          );
+                          if (sameNameDifferentContent) {
+                            showToast("A document with this filename already exists.");
+                            sameFilenameWarningShown = true;
+                          }
+                        }
+                      }
                       await api.uploadWorkspaceDocument(selectedWorkspaceId, uploadFile, "general", undefined, (percent) =>
                         setUploadProgress(percent)
                       );
@@ -823,7 +908,7 @@ export function WorkspaceApp() {
                       setUploadFile(null);
                       if (duplicateDoc) {
                         showToast("Duplicate file detected. Review and remove the duplicate copy if needed.");
-                      } else {
+                      } else if (!sameFilenameWarningShown) {
                         showToast(`${uploadedFileName} uploaded. Processing has started.`);
                       }
                     } catch (err) {
@@ -832,6 +917,13 @@ export function WorkspaceApp() {
                         localStorage.setItem(AUTH_EVENT_KEY, "locked");
                         setMessage("Workspace is locked. Unlock to upload documents.");
                       } else if (err instanceof ApiError) {
+                        if (err.code === "duplicate_file" && err.detail && typeof err.detail === "object") {
+                          const existing = (err.detail as { existing_document?: DuplicateUploadInfo["existing_document"] }).existing_document;
+                          if (existing) {
+                            setDuplicateUploadInfo({ existing_document: existing });
+                          }
+                          showToast("This document was already uploaded.");
+                        } else
                         if (err.code === "unsupported_file_type" || err.status === 415) {
                           setMessage("Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, CSV, TXT.");
                         } else if (err.code === "file_too_large") {
@@ -929,7 +1021,7 @@ export function WorkspaceApp() {
                     <div className="flex items-center justify-between gap-2">
                       <p className="font-medium">{doc.original_filename}</p>
                       <span className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600">
-                        {toProcessingOutcome(doc.status).replaceAll("_", " ")}
+                        {outcomeLabel(doc.status)}
                       </span>
                     </div>
                     <p className="mt-1 text-slate-500">{doc.created_at}</p>
@@ -1262,22 +1354,73 @@ export function WorkspaceApp() {
                     {e.downloaded_at && <p className="text-slate-500">Downloaded: {e.downloaded_at}</p>}
                   </div>
                   <div className="flex gap-2">
-                    <a
-                      className="rounded-md border border-slate-300 bg-white px-2 py-1"
-                      href={selectedWorkspaceId ? api.workspaceReviewPackDownloadUrl(selectedWorkspaceId, e.id) : "#"}
-                    >
-                      Download
-                    </a>
                     <button
-                      className="rounded-md border border-slate-300 bg-white px-2 py-1"
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 disabled:opacity-50"
+                      disabled={!selectedWorkspaceId || downloadingExportId === e.id}
+                      type="button"
                       onClick={async () => {
                         if (!selectedWorkspaceId) return;
-                        await api.deleteWorkspaceReviewPack(selectedWorkspaceId, e.id);
-                        const history = await api.listWorkspaceReviewPacks(selectedWorkspaceId);
-                        setExportHistory(history);
+                        setDownloadingExportId(e.id);
+                        try {
+                          const { blob, filename } = await api.downloadWorkspaceReviewPack(selectedWorkspaceId, e.id);
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = filename;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                          URL.revokeObjectURL(url);
+                          showToast("Encrypted review pack downloaded.");
+                        } catch (err) {
+                          if (err instanceof ApiError && err.status === 404) {
+                            showToast("Review pack is no longer available. Generate a new one.");
+                            const history = await api.listWorkspaceReviewPacks(selectedWorkspaceId);
+                            setExportHistory(history);
+                          } else if (isLockedResponseError(err)) {
+                            setAuthState("LOCKED");
+                            localStorage.setItem(AUTH_EVENT_KEY, "locked");
+                            setMessage("Workspace is locked. Unlock to download review packs.");
+                          } else {
+                            showToast("Download failed. Try again.");
+                          }
+                        } finally {
+                          setDownloadingExportId(null);
+                        }
                       }}
                     >
-                      Delete
+                      {downloadingExportId === e.id ? "Downloading..." : "Download"}
+                    </button>
+                    <button
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 disabled:opacity-50"
+                      disabled={!selectedWorkspaceId || deletingExportId === e.id}
+                      type="button"
+                      onClick={async () => {
+                        if (!selectedWorkspaceId) return;
+                        setDeletingExportId(e.id);
+                        try {
+                          await api.deleteWorkspaceReviewPack(selectedWorkspaceId, e.id);
+                          setExportHistory((prev) => prev.filter((row) => row.id !== e.id));
+                          showToast("Review pack deleted.");
+                          const history = await api.listWorkspaceReviewPacks(selectedWorkspaceId);
+                          setExportHistory(history);
+                        } catch (err) {
+                          if (err instanceof ApiError && err.status === 404) {
+                            setExportHistory((prev) => prev.filter((row) => row.id !== e.id));
+                            showToast("Review pack was already removed.");
+                          } else if (isLockedResponseError(err)) {
+                            setAuthState("LOCKED");
+                            localStorage.setItem(AUTH_EVENT_KEY, "locked");
+                            setMessage("Workspace is locked. Unlock to manage review packs.");
+                          } else {
+                            showToast("Could not delete review pack. Try again.");
+                          }
+                        } finally {
+                          setDeletingExportId(null);
+                        }
+                      }}
+                    >
+                      {deletingExportId === e.id ? "Deleting..." : "Delete"}
                     </button>
                   </div>
                 </div>
