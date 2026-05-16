@@ -3,6 +3,9 @@ import hashlib
 import io
 
 import pytest
+from sqlalchemy import select
+
+from app.models.document import Document
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +100,28 @@ class TestUploadEndpoint:
         docs_after = await async_client.get(f"/api/workspaces/{workspace_id}/documents")
         assert docs_after.status_code == 200
         assert len(docs_after.json()) == count_before
+
+    async def test_duplicate_reupload_allowed_when_existing_failed(self, async_client, db_session):
+        workspace_id = await self._create_workspace(async_client)
+        file_content = b"recoverable-failure-content"
+        first = await async_client.post(
+            f"/api/workspaces/{workspace_id}/documents/upload",
+            files={"file": ("failed.txt", io.BytesIO(file_content), "text/plain")},
+        )
+        assert first.status_code == 202
+        first_doc_id = first.json()["document_id"]
+
+        row = await db_session.execute(select(Document).where(Document.id == first_doc_id))
+        doc = row.scalar_one()
+        doc.status = "classification_failed"
+        doc.status_reason = "temporary failure"
+        await db_session.commit()
+
+        second = await async_client.post(
+            f"/api/workspaces/{workspace_id}/documents/upload",
+            files={"file": ("failed-retry.txt", io.BytesIO(file_content), "text/plain")},
+        )
+        assert second.status_code == 202
 
     async def test_upload_requires_auth(self, async_client):
         resp = await async_client.post(

@@ -27,6 +27,21 @@ class Document(Base):
     extracted_text_hash: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="SHA-256 of extracted text"
     )
+    extraction_status: Mapped[str | None] = mapped_column(
+        String(30), nullable=True, comment="pending / extracted / no_text / failed"
+    )
+    extraction_text_length: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="Extracted text length in characters"
+    )
+    classification_status: Mapped[str | None] = mapped_column(
+        String(30), nullable=True, comment="pending / classified / needs_review / failed / not_configured"
+    )
+    classification_provider: Mapped[str | None] = mapped_column(
+        String(50), nullable=True, comment="AI classification provider name"
+    )
+    classification_error: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="Classification error summary"
+    )
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, default="uploaded",
         comment="uploaded / processing / processed / failed / needs_review"

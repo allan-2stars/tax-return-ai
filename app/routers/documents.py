@@ -40,6 +40,7 @@ ALLOWED_MIME_TYPES = {
     "text/plain",
 }
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".csv", ".txt"}
+RECOVERABLE_DUPLICATE_STATUSES = {"failed", "classification_failed", "processing_failed"}
 
 
 def _upload_error(status_code: int, code: str, message: str, retryable: bool) -> HTTPException:
@@ -139,20 +140,24 @@ async def upload_document(
     )
     existing_doc = existing_result.scalars().first()
     if existing_doc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "duplicate_file",
-                "message": "This document was already uploaded.",
-                "retryable": False,
-                "existing_document": {
-                    "id": existing_doc.id,
-                    "original_filename": existing_doc.original_filename,
-                    "created_at": existing_doc.created_at.isoformat(),
-                    "status": existing_doc.status,
+        if (existing_doc.status or "").lower() in RECOVERABLE_DUPLICATE_STATUSES:
+            # Allow recovery upload when the existing copy failed to process.
+            existing_doc.status_reason = "Replaced after previous processing failure."
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "duplicate_file",
+                    "message": "This document was already uploaded.",
+                    "retryable": False,
+                    "existing_document": {
+                        "id": existing_doc.id,
+                        "original_filename": existing_doc.original_filename,
+                        "created_at": existing_doc.created_at.isoformat(),
+                        "status": existing_doc.status,
+                    },
                 },
-            },
-        )
+            )
 
     doc = Document(
         session_id=session_id,
@@ -161,6 +166,11 @@ async def upload_document(
         file_size_bytes=len(file_data),
         file_hash=file_hash,
         status="uploaded",
+        extraction_status="pending",
+        extraction_text_length=0,
+        classification_status="pending",
+        classification_provider=None,
+        classification_error=None,
         category=category,
         financial_year=financial_year,
     )
@@ -265,6 +275,11 @@ async def upload_documents_batch(
             file_size_bytes=len(file_data),
             file_hash=file_hash,
             status="uploaded",
+            extraction_status="pending",
+            extraction_text_length=0,
+            classification_status="pending",
+            classification_provider=None,
+            classification_error=None,
             category=category,
             financial_year=financial_year,
         )

@@ -11,6 +11,14 @@ def get_provider() -> AIProvider:
     if provider == "openai":
         from app.ai.providers.openai import OpenAIProvider
         return OpenAIProvider()
+    if provider == "deepseek":
+        from app.ai.providers.openai import OpenAIProvider
+        return OpenAIProvider(
+            api_key=settings.deepseek_api_key,
+            model=settings.ai_model or "deepseek-v4-flash",
+            base_url=settings.deepseek_base_url or "https://api.deepseek.com",
+            provider_name="deepseek",
+        )
     if provider == "mock":
         from app.ai.providers.mock import MockProvider
         return MockProvider()
@@ -23,4 +31,8 @@ def provider_config_warning() -> str | None:
         return "AI classification is not configured. Set ANTHROPIC_API_KEY or use AI_PROVIDER=mock."
     if provider == "openai" and not settings.openai_api_key:
         return "AI classification is not configured. Set OPENAI_API_KEY or use AI_PROVIDER=mock."
+    if provider == "deepseek" and not settings.deepseek_api_key:
+        return "AI classification is not configured. Set DEEPSEEK_API_KEY or use AI_PROVIDER=mock."
+    if provider not in {"anthropic", "openai", "deepseek", "mock"}:
+        return "AI classification is not configured correctly."
     return None

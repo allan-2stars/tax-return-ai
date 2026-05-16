@@ -93,9 +93,18 @@ CLASSIFICATION_RESPONSE_SCHEMA = {
 
 
 class OpenAIProvider(AIProvider):
-    def __init__(self):
-        self.api_key = settings.openai_api_key
-        self.model = settings.ai_model or "gpt-4o-mini"
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        provider_name: str = "openai",
+    ):
+        self.provider_name = provider_name
+        self.api_key = api_key if api_key is not None else settings.openai_api_key
+        self.model = model if model is not None else (settings.ai_model or "gpt-4o-mini")
+        self.base_url = base_url
 
     async def classify(
         self,
@@ -109,7 +118,7 @@ class OpenAIProvider(AIProvider):
         try:
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(api_key=self.api_key)
+            client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
             user_prompt = _build_classify_prompt(
                 extracted_text, document_id, financial_year, skill_context
@@ -140,8 +149,8 @@ class OpenAIProvider(AIProvider):
                     parsed,
                     document_id,
                     financial_year,
-                    provider_name="openai",
-                    default_description="Classified by OpenAI.",
+                    provider_name=self.provider_name,
+                    default_description="Classified by AI provider.",
                 )]
 
             # Fallback
@@ -152,13 +161,13 @@ class OpenAIProvider(AIProvider):
                 "category": "needs_review",
                 "amount": None,
                 "currency": "AUD",
-                "description": "OpenAI response could not be parsed.",
+                "description": "AI provider response could not be parsed.",
                 "confidence": 0.1,
                 "needs_review": True,
                 "review_reason": f"Failed to parse response. Raw: {raw[:200]}...",
                 "ato_reference_hint": None,
                 "metadata": {
-                    "provider": "openai",
+                    "provider": self.provider_name,
                     "model_version": self.model,
                     "raw_response_preview": raw[:500],
                 },
@@ -167,8 +176,10 @@ class OpenAIProvider(AIProvider):
         except Exception as e:
             msg = str(e).lower()
             if any(k in msg for k in ["authentication", "api key", "unauthorized", "invalid_api_key"]):
-                raise AIProviderConfigurationError("OpenAI API credentials are invalid or missing.") from e
-            raise AIProviderError(f"OpenAI provider failure: {e}") from e
+                provider_label = "DeepSeek" if self.provider_name == "deepseek" else "OpenAI"
+                raise AIProviderConfigurationError(f"{provider_label} API credentials are invalid or missing.") from e
+            provider_label = "DeepSeek" if self.provider_name == "deepseek" else "OpenAI"
+            raise AIProviderError(f"{provider_label} provider failure: {e}") from e
 
     async def health_check(self) -> bool:
         """Check if the OpenAI API is reachable."""
@@ -177,7 +188,7 @@ class OpenAIProvider(AIProvider):
         try:
             from openai import AsyncOpenAI
 
-            client = AsyncOpenAI(api_key=self.api_key)
+            client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
             await client.models.list(limit=1)
             return True
         except Exception:

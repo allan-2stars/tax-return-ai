@@ -25,6 +25,9 @@ vi.mock('@/lib/api', async (importOriginal) => {
       getWorkspaceReviewSummary: vi.fn(),
       listWorkspaceItems: vi.fn(),
       setWorkspaceItemReviewStatus: vi.fn(),
+      listWorkspaceManualReviewDocuments: vi.fn(),
+      createWorkspaceManualItem: vi.fn(),
+      applyWorkspaceManualReviewAction: vi.fn(),
       listWorkspaceReviewPacks: vi.fn(),
       generateWorkspaceReviewPack: vi.fn(),
       workspaceReviewPackDownloadUrl: vi.fn(),
@@ -50,6 +53,11 @@ describe('WorkspaceApp API-backed states', () => {
       },
       configurable: true,
     });
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      value: vi.fn(),
+      configurable: true,
+      writable: true,
+    });
     apiMock.authLogout.mockResolvedValue({ ok: true });
     apiMock.authLock.mockResolvedValue({ ok: true });
     apiMock.downloadWorkspaceReviewPack.mockResolvedValue({
@@ -57,6 +65,24 @@ describe('WorkspaceApp API-backed states', () => {
       filename: 'tax-review-pack-e1.enc.zip',
     });
     apiMock.listWorkspaceReviewPacks.mockResolvedValue([]);
+    apiMock.listWorkspaceManualReviewDocuments.mockResolvedValue([]);
+    apiMock.createWorkspaceManualItem.mockResolvedValue({
+      id: "mi1",
+      session_id: "s1",
+      item_type: "needs_review",
+      category: "needs_review",
+      amount: null,
+      description: "manual",
+      confidence: 0,
+      needs_review: true,
+      review_status: "needs_review",
+      review_reason: null,
+      ato_reference_hint: null,
+      reviewed_at: null,
+      reviewed_by: "user",
+      created_at: "",
+    });
+    apiMock.applyWorkspaceManualReviewAction.mockResolvedValue({ ok: true });
     apiMock.listWorkspaceDocuments.mockResolvedValue([]);
     apiMock.uploadWorkspaceDocument.mockResolvedValue({
       document_id: 'd1',
@@ -333,7 +359,7 @@ describe('WorkspaceApp API-backed states', () => {
       { id: 'a1', entity_type: 'export_package', entity_id: 'e1', action: 'review_pack_downloaded', changed_by: 'user', details: null, created_at: '2026-05-15T00:00:00Z' },
     ]);
     render(<WorkspaceApp />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Expand' }));
+    fireEvent.click((await screen.findByText('Recent Activity')).closest('button') as HTMLButtonElement);
     expect(await screen.findByTestId('audit-events-panel')).toBeInTheDocument();
     expect(screen.getByText('review pack downloaded')).toBeInTheDocument();
   });
@@ -384,9 +410,20 @@ describe('WorkspaceApp API-backed states', () => {
       { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
     ]);
     apiMock.getWorkspaceReviewSummary.mockResolvedValue({
-      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, manual_review_documents: 1, ready_for_export: false, blocking_reasons: ['1 document(s) need manual review before export.'],
     });
     apiMock.listWorkspaceItems.mockResolvedValue([]);
+    apiMock.listWorkspaceManualReviewDocuments.mockResolvedValue([
+      {
+        id: 'd1',
+        filename: 'scan.pdf',
+        status: 'needs_review',
+        status_reason: 'Classification produced no items — manual review required.',
+        provider_mode: 'manual',
+        item_count: 0,
+        created_at: '2026-05-16T00:00:00Z',
+      },
+    ]);
     apiMock.listWorkspaceDocuments.mockResolvedValue([
       {
         id: 'd1',
@@ -425,7 +462,9 @@ describe('WorkspaceApp API-backed states', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Documents' }));
     expect(await screen.findByText('Needs manual review. OCR/classification did not produce a complete item set for this document.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Review Items' }));
-    expect(await screen.findByText('Documents exist but no items were extracted yet. Open Documents to review processing outcomes.')).toBeInTheDocument();
+    expect(await screen.findByTestId('manual-review-document-card')).toBeInTheDocument();
+    expect(screen.getByText('No extracted items yet. Review the documents below or add a manual item.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add manual item' })).toBeInTheDocument();
   });
 
   it('shows provider configuration warning for manual review when AI is not configured', async () => {
@@ -735,6 +774,82 @@ describe('WorkspaceApp API-backed states', () => {
     expect(screen.getByRole('button', { name: 'Cancel upload' })).toBeInTheDocument();
   });
 
+  it('cancel upload clears duplicate warning and selected file', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    apiMock.listWorkspaceDocuments.mockResolvedValue([]);
+    apiMock.uploadWorkspaceDocument.mockRejectedValue(
+      new ApiError('This document was already uploaded.', 409, 'duplicate_file', false, {
+        existing_document: { id: 'd-existing', original_filename: 'existing.pdf', created_at: '2026-05-16T00:00:00Z', status: 'classified' },
+      })
+    );
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Documents' }));
+    const input = await screen.findByTestId('documents-file-input');
+    fireEvent.change(input, { target: { files: [new File(['%PDF-1.4'], 'dup.pdf', { type: 'application/pdf' })] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload document' }));
+    expect(await screen.findByTestId('duplicate-upload-info')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel upload' }));
+    expect(screen.queryByTestId('duplicate-upload-info')).toBeNull();
+    expect(screen.queryByText(/Selected file:/)).toBeNull();
+  });
+
+  it('view existing document clears upload state and highlights the existing document row', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 0, draft: 0, needs_review: 0, confirmed: 0, excluded: 0, tax_agent_review: 0, ready_for_export: false, blocking_reasons: ['No review items available yet.'],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    apiMock.listWorkspaceDocuments.mockResolvedValue([
+      {
+        id: 'd-existing',
+        session_id: 's1',
+        original_filename: 'existing.pdf',
+        mime_type: 'application/pdf',
+        file_size_bytes: 100,
+        file_hash: null,
+        category: null,
+        financial_year: 'FY2025',
+        status: 'classified',
+        status_reason: null,
+        item_count: 2,
+        provider_mode: 'mock',
+        retryable: false,
+        created_at: '2026-05-16T00:00:00Z',
+      },
+    ]);
+    apiMock.uploadWorkspaceDocument.mockRejectedValue(
+      new ApiError('This document was already uploaded.', 409, 'duplicate_file', false, {
+        existing_document: { id: 'd-existing', original_filename: 'existing.pdf', created_at: '2026-05-16T00:00:00Z', status: 'classified' },
+      })
+    );
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Documents' }));
+    const input = await screen.findByTestId('documents-file-input');
+    fireEvent.change(input, { target: { files: [new File(['%PDF-1.4'], 'dup.pdf', { type: 'application/pdf' })] } });
+    expect(screen.getByText(/Selected file:/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Upload document' }));
+    expect(await screen.findByTestId('duplicate-upload-info')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'View existing document' }));
+    expect(screen.queryByTestId('duplicate-upload-info')).toBeNull();
+    expect(screen.queryByText(/Selected file:/)).toBeNull();
+    await waitFor(() => {
+      const row = screen.getByText('existing.pdf').closest('article');
+      expect(row?.className).toContain('bg-emerald-50');
+    });
+  });
+
   it('allows same filename with different content and shows warning only', async () => {
     apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
     apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
@@ -851,8 +966,11 @@ describe('WorkspaceApp API-backed states', () => {
     ]);
     render(<WorkspaceApp />);
     fireEvent.click(await screen.findByRole('button', { name: 'Documents' }));
-    expect(await screen.findByText('Try again')).toBeInTheDocument();
-    expect(screen.getByText('This file needs manual review. Re-upload may not change the outcome.')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: 'Retry processing' }).length).toBeGreaterThan(0);
+      expect(screen.getAllByRole('button', { name: 'Replace document' }).length).toBeGreaterThan(0);
+      expect(screen.getAllByRole('button', { name: 'Delete failed document' }).length).toBeGreaterThan(0);
+    });
   });
 
   it('shows review-pack blocker reason when export is disabled', async () => {
@@ -949,7 +1067,7 @@ describe('WorkspaceApp API-backed states', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
     expect(await screen.findByText('tax-review-pack-e1.enc.zip')).toBeInTheDocument();
     expect(screen.getByText(/100 bytes · sha256 abcdef123456/)).toBeInTheDocument();
-    expect(screen.getByText('Downloaded: 2026-01-02T00:00:00Z')).toBeInTheDocument();
+    expect(screen.getByText(/Downloaded:/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy checksum' })).toBeInTheDocument();
   });
 

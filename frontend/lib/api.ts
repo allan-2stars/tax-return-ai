@@ -68,6 +68,11 @@ export interface Document {
   item_count?: number;
   provider_mode?: "mock" | "local" | "cloud" | "manual";
   retryable?: boolean;
+  extraction_status?: "pending" | "extracted" | "no_text" | "failed";
+  extraction_text_length?: number;
+  classification_status?: "pending" | "classified" | "needs_review" | "failed" | "not_configured";
+  classification_provider?: string | null;
+  classification_error?: string | null;
   created_at: string;
   updated_at?: string;
 }
@@ -320,8 +325,19 @@ export interface WorkspaceReviewSummary {
   confirmed: number;
   excluded: number;
   tax_agent_review: number;
+  manual_review_documents?: number;
   ready_for_export: boolean;
   blocking_reasons: string[];
+}
+
+export interface ManualReviewDocument {
+  id: string;
+  filename: string;
+  status: string;
+  status_reason: string | null;
+  provider_mode: "mock" | "local" | "cloud" | "manual";
+  item_count: number;
+  created_at: string;
 }
 
 export interface WorkspaceExportRecord {
@@ -579,6 +595,33 @@ export const api = {
     }),
   getWorkspaceReviewSummary: (workspaceId: string) =>
     request<WorkspaceReviewSummary>(`/api/workspaces/${workspaceId}/review-summary`),
+  listWorkspaceManualReviewDocuments: (workspaceId: string) =>
+    request<ManualReviewDocument[]>(`/api/workspaces/${workspaceId}/manual-review-documents`),
+  createWorkspaceManualItem: (
+    workspaceId: string,
+    documentId: string,
+    data: {
+      description: string;
+      item_type?: string;
+      category?: string;
+      amount?: number | null;
+      review_status?: "needs_review" | "confirmed" | "excluded" | "tax_agent_review";
+      note?: string;
+    }
+  ) =>
+    request<TaxItem>(`/api/workspaces/${workspaceId}/documents/${documentId}/manual-item`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  applyWorkspaceManualReviewAction: (
+    workspaceId: string,
+    documentId: string,
+    action: "exclude_document" | "tax_agent_review"
+  ) =>
+    request<{ ok: boolean }>(`/api/workspaces/${workspaceId}/documents/${documentId}/manual-review-action`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
   generateWorkspaceReviewPack: (
     workspaceId: string,
     data: { export_password: string; include_source_documents: boolean }

@@ -70,5 +70,15 @@ class WorkspaceReviewSummaryResponse(BaseModel):
     confirmed: int
     excluded: int
     tax_agent_review: int
+    manual_review_documents: int = 0
     ready_for_export: bool
     blocking_reasons: list[str]
+
+
+class WorkspaceManualItemCreateRequest(BaseModel):
+    description: str = Field(min_length=1, max_length=2000)
+    item_type: str = "needs_review"
+    category: str = "needs_review"
+    amount: float | None = None
+    review_status: str = "needs_review"
+    note: str | None = None

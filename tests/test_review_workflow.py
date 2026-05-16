@@ -3,6 +3,8 @@ from sqlalchemy import select
 from app.models.tax_item import TaxItem
 from app.models.tax_session import TaxSession
 from app.models.tax_workspace import TaxWorkspace
+from app.models.document import Document
+from app.models.document_item import DocumentItem
 from app.models.user import User
 
 
@@ -169,3 +171,84 @@ async def test_review_summary_matches_workspace_item_list_counts(async_client, d
     filtered_items = filtered.json()
     assert len(filtered_items) == 2
     assert summary_payload['needs_review'] == len(filtered_items)
+
+
+async def test_manual_review_document_with_zero_items_appears_and_blocks_export(async_client, db_session):
+    workspace_id = await _setup_workspace(async_client)
+    ensure = await async_client.get(f'/api/workspaces/{workspace_id}/items')
+    assert ensure.status_code == 200
+    session = await _get_workspace_session(db_session, workspace_id)
+
+    doc = Document(
+        session_id=session.id,
+        original_filename='manual-needed.pdf',
+        mime_type='application/pdf',
+        file_size_bytes=100,
+        status='needs_review',
+        status_reason='Classification produced no items.',
+        financial_year=session.financial_year,
+    )
+    db_session.add(doc)
+    await db_session.commit()
+
+    manual_docs = await async_client.get(f'/api/workspaces/{workspace_id}/manual-review-documents')
+    assert manual_docs.status_code == 200
+    payload = manual_docs.json()
+    assert len(payload) == 1
+    assert payload[0]['id'] == doc.id
+    assert payload[0]['item_count'] == 0
+
+    summary = await async_client.get(f'/api/workspaces/{workspace_id}/review-summary')
+    assert summary.status_code == 200
+    summary_payload = summary.json()
+    assert summary_payload['manual_review_documents'] == 1
+    assert summary_payload['ready_for_export'] is False
+    assert any('manual review' in reason.lower() for reason in summary_payload['blocking_reasons'])
+
+
+async def test_add_manual_item_links_to_document_and_resolves_manual_blocker(async_client, db_session):
+    workspace_id = await _setup_workspace(async_client)
+    ensure = await async_client.get(f'/api/workspaces/{workspace_id}/items')
+    assert ensure.status_code == 200
+    session = await _get_workspace_session(db_session, workspace_id)
+
+    doc = Document(
+        session_id=session.id,
+        original_filename='manual-item-source.pdf',
+        mime_type='application/pdf',
+        file_size_bytes=120,
+        status='needs_review',
+        status_reason='No extracted items.',
+        financial_year=session.financial_year,
+    )
+    db_session.add(doc)
+    await db_session.commit()
+
+    create_res = await async_client.post(
+        f'/api/workspaces/{workspace_id}/documents/{doc.id}/manual-item',
+        json={
+            'description': 'User entered manual item',
+            'review_status': 'needs_review',
+            'item_type': 'needs_review',
+            'category': 'needs_review',
+        },
+    )
+    assert create_res.status_code == 200
+    created = create_res.json()
+    assert created['session_id'] == session.id
+    assert created['review_status'] == 'needs_review'
+    assert created['description'] == 'User entered manual item'
+
+    links = await db_session.execute(select(DocumentItem).where(DocumentItem.document_id == doc.id))
+    link = links.scalar_one_or_none()
+    assert link is not None
+    assert link.tax_item_id == created['id']
+
+    manual_docs = await async_client.get(f'/api/workspaces/{workspace_id}/manual-review-documents')
+    assert manual_docs.status_code == 200
+    assert manual_docs.json() == []
+
+    summary = await async_client.get(f'/api/workspaces/{workspace_id}/review-summary')
+    assert summary.status_code == 200
+    summary_payload = summary.json()
+    assert summary_payload['manual_review_documents'] == 0

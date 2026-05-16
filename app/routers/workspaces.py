@@ -24,7 +24,12 @@ from app.services.auth.service import seed_default_workspaces
 from app.services.compliance_review import run_compliance_review
 from app.services.export.encrypted_pack import generate_encrypted_review_pack
 from app.services.export.encrypted_pack import validate_export_password
-from app.schemas.tax_item import WorkspaceReviewStatusUpdate, WorkspaceReviewSummaryResponse, TaxItemResponse
+from app.schemas.tax_item import (
+    WorkspaceReviewStatusUpdate,
+    WorkspaceReviewSummaryResponse,
+    TaxItemResponse,
+    WorkspaceManualItemCreateRequest,
+)
 from app.schemas.export import WorkspaceExportGenerateRequest, WorkspaceExportRecord
 from app.services.audit.writer import write_audit
 from app.services.export.cleanup import cleanup_deleted_review_packs
@@ -33,6 +38,7 @@ from app.services.security.key_cache import get_session_key
 from app.services.security.field_encryption import decrypt_text, is_encrypted
 from app.db.auth_deps import get_request_token
 from app.services.security.unlock_capability import get_capability_metrics
+from app.config import settings
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 VALID_REVIEW_STATUSES = {"draft", "needs_review", "confirmed", "excluded", "tax_agent_review"}
@@ -47,6 +53,18 @@ SECURITY_EVENT_ACTIONS = {
     "encryption_key_missing",
     "encrypted_write_blocked",
 }
+
+
+def _runtime_provider_mode() -> str:
+    provider = (settings.ai_provider or "mock").lower()
+    if provider == "mock":
+        return "mock"
+    if provider in {"openai", "anthropic"}:
+        return "cloud"
+    return "manual"
+
+
+MANUAL_REVIEW_DOCUMENT_STATUSES = {"needs_review", "failed", "classification_failed", "extraction_failed"}
 
 
 def _safe_audit_details(details: str | None) -> str | None:
@@ -66,6 +84,16 @@ def _safe_audit_details(details: str | None) -> str | None:
         else:
             redacted[key] = value
     return json.dumps(redacted, separators=(",", ":"))
+
+
+def _friendly_classification_reason(doc: Document) -> str | None:
+    if doc.classification_status == "not_configured":
+        return "Text extracted; AI classification needs setup/manual review."
+    if doc.classification_status == "failed":
+        return "Text extracted, but classification failed. Manual review required."
+    if doc.extraction_status == "no_text":
+        return "OCR returned no text."
+    return doc.status_reason
 
 
 def _to_response(ws: TaxWorkspace) -> WorkspaceResponse:
@@ -270,7 +298,7 @@ async def list_workspace_documents(
         if not provider_mode and doc.status == "needs_review":
             provider_mode = "manual"
         if not provider_mode:
-            provider_mode = "mock"
+            provider_mode = _runtime_provider_mode()
         payload.append(
             {
                 "id": doc.id,
@@ -282,12 +310,17 @@ async def list_workspace_documents(
                 "category": doc.category,
                 "financial_year": doc.financial_year,
                 "status": doc.status,
-                "status_reason": doc.status_reason,
+                "status_reason": _friendly_classification_reason(doc),
                 "created_at": doc.created_at,
                 "updated_at": doc.updated_at,
                 "item_count": item_counts.get(doc.id, 0),
                 "provider_mode": provider_mode,
                 "retryable": retryable,
+                "extraction_status": doc.extraction_status or ("no_text" if doc.status == "needs_review" and item_counts.get(doc.id, 0) == 0 else "pending"),
+                "extraction_text_length": doc.extraction_text_length or 0,
+                "classification_status": doc.classification_status or ("classified" if doc.status == "classified" else "pending"),
+                "classification_provider": doc.classification_provider or provider_mode_by_doc.get(doc.id),
+                "classification_error": doc.classification_error,
             }
         )
     await db.commit()
@@ -488,6 +521,18 @@ async def workspace_review_summary(
     await touch_workspace_opened(workspace)
     result = await db.execute(select(TaxItem).where(TaxItem.session_id == session.id))
     items = result.scalars().all()
+    doc_result = await db.execute(select(Document).where(Document.session_id == session.id))
+    docs = doc_result.scalars().all()
+    unresolved_manual_review_documents = []
+    for doc in docs:
+        if doc.status not in MANUAL_REVIEW_DOCUMENT_STATUSES:
+            continue
+        count_result = await db.execute(
+            select(func.count(DocumentItem.id)).where(DocumentItem.document_id == doc.id)
+        )
+        doc_item_count = int(count_result.scalar_one() or 0)
+        if doc_item_count == 0:
+            unresolved_manual_review_documents.append(doc)
 
     counts = {status: 0 for status in VALID_REVIEW_STATUSES}
     for item in items:
@@ -503,6 +548,10 @@ async def workspace_review_summary(
         blocking_reasons.append(f"{counts['needs_review']} item(s) still need review.")
     if counts["tax_agent_review"] > 0:
         blocking_reasons.append(f"{counts['tax_agent_review']} item(s) require tax agent review.")
+    if len(unresolved_manual_review_documents) > 0:
+        blocking_reasons.append(
+            f"{len(unresolved_manual_review_documents)} document(s) need manual review before export."
+        )
 
     return WorkspaceReviewSummaryResponse(
         total_items=len(items),
@@ -511,9 +560,152 @@ async def workspace_review_summary(
         confirmed=counts["confirmed"],
         excluded=counts["excluded"],
         tax_agent_review=counts["tax_agent_review"],
+        manual_review_documents=len(unresolved_manual_review_documents),
         ready_for_export=len(blocking_reasons) == 0,
         blocking_reasons=blocking_reasons,
     )
+
+
+@router.get("/{workspace_id}/manual-review-documents")
+async def list_workspace_manual_review_documents(
+    workspace_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_unlocked_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+    doc_result = await db.execute(
+        select(Document).where(Document.session_id == session.id).order_by(Document.created_at.desc())
+    )
+    docs = doc_result.scalars().all()
+    payload: list[dict] = []
+    for doc in docs:
+        if doc.status not in MANUAL_REVIEW_DOCUMENT_STATUSES:
+            continue
+        count_result = await db.execute(
+            select(func.count(DocumentItem.id)).where(DocumentItem.document_id == doc.id)
+        )
+        item_count = int(count_result.scalar_one() or 0)
+        if item_count > 0:
+            continue
+        payload.append(
+            {
+                "id": doc.id,
+                "filename": doc.original_filename,
+                "status": doc.status,
+                "status_reason": doc.status_reason,
+                "provider_mode": "manual" if doc.status == "needs_review" else _runtime_provider_mode(),
+                "item_count": item_count,
+                "created_at": doc.created_at,
+            }
+        )
+    await db.commit()
+    return payload
+
+
+@router.post("/{workspace_id}/documents/{document_id}/manual-item", response_model=TaxItemResponse)
+async def create_workspace_manual_item(
+    workspace_id: str,
+    document_id: str,
+    payload: WorkspaceManualItemCreateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_unlocked_user),
+):
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+    doc_result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.session_id == session.id)
+    )
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    review_status = payload.review_status if payload.review_status in VALID_REVIEW_STATUSES else "needs_review"
+    key = await _require_field_key_for_write(
+        db,
+        request,
+        "tax_item",
+        document_id,
+        ["description", "review_reason"],
+    )
+    from app.services.security.field_encryption import encrypt_text, ENCRYPTION_VERSION, DEFAULT_KEY_VERSION
+
+    item = TaxItem(
+        session_id=session.id,
+        item_type=payload.item_type or "needs_review",
+        category=payload.category or "needs_review",
+        amount=payload.amount,
+        description=None,
+        description_enc=encrypt_text(payload.description, key),
+        confidence=0.0,
+        needs_review=review_status in {"draft", "needs_review", "tax_agent_review"},
+        review_status=review_status,
+        review_reason=None,
+        review_reason_enc=encrypt_text(payload.note, key) if payload.note else None,
+        reviewed_by="user",
+        encryption_version=ENCRYPTION_VERSION,
+        key_version=DEFAULT_KEY_VERSION,
+    )
+    db.add(item)
+    await db.flush()
+    db.add(DocumentItem(document_id=doc.id, tax_item_id=item.id))
+    if doc.status in MANUAL_REVIEW_DOCUMENT_STATUSES:
+        doc.status = "reviewed"
+        doc.status_reason = "Manual item added by user."
+    await write_audit(
+        db,
+        "tax_item",
+        item.id,
+        "manual_item_created",
+        details={"workspace_id": workspace_id, "document_id": doc.id, "review_status": review_status},
+    )
+    await db.commit()
+    await db.refresh(item)
+    _decrypt_item_fields(item, key)
+    return item
+
+
+@router.post("/{workspace_id}/documents/{document_id}/manual-review-action")
+async def apply_workspace_manual_review_action(
+    workspace_id: str,
+    document_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_unlocked_user),
+):
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"exclude_document", "tax_agent_review"}:
+        raise HTTPException(status_code=400, detail="Invalid manual review action")
+    workspace = await get_workspace_for_user(db, current_user, workspace_id)
+    session = await get_or_create_workspace_session(db, workspace)
+    await touch_workspace_opened(workspace)
+    doc_result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.session_id == session.id)
+    )
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if action == "exclude_document":
+        doc.status = "reviewed"
+        doc.status_reason = "Excluded by user from review pack."
+        audit_action = "manual_review_document_excluded"
+    else:
+        doc.status = "needs_review"
+        doc.status_reason = "Marked for tax agent review."
+        audit_action = "manual_review_document_tax_agent_review"
+    await write_audit(
+        db,
+        "document",
+        doc.id,
+        audit_action,
+        details={"workspace_id": workspace_id},
+    )
+    await db.commit()
+    return {"ok": True}
 
 
 @router.get("/{workspace_id}/issues")

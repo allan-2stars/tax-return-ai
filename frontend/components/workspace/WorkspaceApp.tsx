@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import React from "react";
 import {
   api,
@@ -14,6 +14,7 @@ import {
   type WorkspaceAuditEvent,
   type WorkspaceReviewSummary,
   type WorkspaceSecurityStatus,
+  type ManualReviewDocument,
 } from "@/lib/api";
 
 type NavItem = "Dashboard" | "Documents" | "Review Items" | "Issues" | "Review Pack" | "Settings";
@@ -63,6 +64,31 @@ function outcomeLabel(status: string): string {
   if (outcome === "classified") return "Classified";
   if (outcome === "failed") return "Failed";
   return "Uploaded";
+}
+
+function formatDateTime(value?: string | null): string {
+  if (!value) return "Unknown time";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "Unknown time";
+  return dt.toLocaleString("en-AU", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function friendlyStatusReason(reason?: string | null): string | null {
+  if (!reason) return null;
+  const lower = reason.toLowerCase();
+  if (lower.includes("provider_not_configured") || lower.includes("ai classification is not configured")) {
+    return "AI classification is not configured correctly. Document needs manual review.";
+  }
+  if (lower.includes("classification_failed") || lower.includes("processing_failed")) {
+    return "Processing failed. You can retry, replace, or delete this document.";
+  }
+  return reason;
 }
 
 function validateMasterPassword(password: string): string | null {
@@ -118,6 +144,7 @@ export function WorkspaceApp() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [jobsLoading, setJobsLoading] = useState(false);
   const [reviewItems, setReviewItems] = useState<TaxItem[]>([]);
+  const [manualReviewDocuments, setManualReviewDocuments] = useState<ManualReviewDocument[]>([]);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
   const [exportPassword, setExportPassword] = useState("");
   const [confirmExportPassword, setConfirmExportPassword] = useState("");
@@ -134,12 +161,16 @@ export function WorkspaceApp() {
   const [showAllDocuments, setShowAllDocuments] = useState(false);
   const [activityCollapsed, setActivityCollapsed] = useState(true);
   const [showAllActivity, setShowAllActivity] = useState(false);
+  const [highlightDocumentId, setHighlightDocumentId] = useState<string | null>(null);
+  const [pendingScrollDocumentId, setPendingScrollDocumentId] = useState<string | null>(null);
   const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useState<number>(() => {
     if (typeof window === "undefined") return 15;
     return Number(window.localStorage.getItem("taxai_idle_timeout_minutes") || 15);
   });
   const [selectedItem, setSelectedItem] = useState<TaxItem | null>(null);
   const [duplicateUploadInfo, setDuplicateUploadInfo] = useState<DuplicateUploadInfo | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const documentRowRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const isAllowedUploadFile = (file: File): boolean => {
     const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
@@ -164,16 +195,19 @@ export function WorkspaceApp() {
 
   const refreshReviewData = async (workspaceId: string, filter: ReviewFilter) => {
     try {
-      const [summary, items] = await Promise.all([
+      const [summary, items, manualDocs] = await Promise.all([
         api.getWorkspaceReviewSummary(workspaceId),
         api.listWorkspaceItems(workspaceId, filter === "all" ? undefined : filter),
+        api.listWorkspaceManualReviewDocuments(workspaceId),
       ]);
       setReviewSummary(summary);
       setReviewItems(items);
+      setManualReviewDocuments(manualDocs);
       setMessage(null);
     } catch (err) {
       setReviewSummary(null);
       setReviewItems([]);
+      setManualReviewDocuments([]);
       if (isLockedResponseError(err)) {
         setAuthState("LOCKED");
         localStorage.setItem(AUTH_EVENT_KEY, "locked");
@@ -308,6 +342,17 @@ export function WorkspaceApp() {
   }, [authState, selectedWorkspaceId, activeNav]);
 
   useEffect(() => {
+    if (!pendingScrollDocumentId || activeNav !== "Documents") return;
+    const el = documentRowRefs.current[pendingScrollDocumentId];
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightDocumentId(pendingScrollDocumentId);
+    setPendingScrollDocumentId(null);
+    const timer = window.setTimeout(() => setHighlightDocumentId(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [pendingScrollDocumentId, activeNav, documents]);
+
+  useEffect(() => {
     if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
     void (async () => {
       try {
@@ -431,7 +476,7 @@ export function WorkspaceApp() {
   const failedJobs = jobs.filter((j) => j.status === "failed").length;
   const duplicateDocuments = documents.filter((d) => d.status === "duplicate_detected").length;
   const failedDocuments = documents.filter((d) => d.status === "classification_failed" || d.status === "extraction_failed").length;
-  const manualReviewDocuments = documents.filter((d) => d.status === "needs_review").length;
+  const manualReviewDocumentCount = documents.filter((d) => d.status === "needs_review").length;
   const hasAnyDocuments = documents.length > 0;
   const hasMockOrManualProvider = documents.some((d) => d.provider_mode === "mock" || d.provider_mode === "manual");
 
@@ -731,7 +776,7 @@ export function WorkspaceApp() {
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="duplicate-upload-info">
             <p className="font-medium">This document was already uploaded.</p>
             <p className="mt-1">
-              Existing: {duplicateUploadInfo.existing_document.original_filename} · {duplicateUploadInfo.existing_document.created_at} · {duplicateUploadInfo.existing_document.status}
+              Existing: {duplicateUploadInfo.existing_document.original_filename} · {formatDateTime(duplicateUploadInfo.existing_document.created_at)} · {outcomeLabel(duplicateUploadInfo.existing_document.status)}
             </p>
             <div className="mt-2 flex gap-2">
               <button
@@ -739,6 +784,12 @@ export function WorkspaceApp() {
                 className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700"
                 onClick={() => {
                   setActiveNav("Documents");
+                  setUploadFile(null);
+                  setUploadProgress(0);
+                  setMessage(null);
+                  if (fileInputRef.current) fileInputRef.current.value = "";
+                  setDocumentsCollapsed(false);
+                  setPendingScrollDocumentId(duplicateUploadInfo.existing_document.id);
                   setDuplicateUploadInfo(null);
                 }}
               >
@@ -747,7 +798,12 @@ export function WorkspaceApp() {
               <button
                 type="button"
                 className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700"
-                onClick={() => setDuplicateUploadInfo(null)}
+                onClick={() => {
+                  setDuplicateUploadInfo(null);
+                  setUploadFile(null);
+                  setUploadProgress(0);
+                  if (fileInputRef.current) fileInputRef.current.value = "";
+                }}
               >
                 Cancel upload
               </button>
@@ -765,7 +821,7 @@ export function WorkspaceApp() {
             <article className="rounded-lg border border-slate-200 bg-slate-50 p-3" data-testid="workspace-health-summary">
               <p className="text-xs font-medium text-slate-700">Workspace Health</p>
               <p className="mt-1 text-xs text-slate-600">
-                {documents.length} documents, {queuedOrRunningJobs} processing, {failedDocuments} failed, {duplicateDocuments} duplicates flagged, {manualReviewDocuments} manual review.
+                {documents.length} documents, {queuedOrRunningJobs} processing, {failedDocuments} failed, {duplicateDocuments} duplicates flagged, {manualReviewDocumentCount} manual review.
               </p>
               <p className="text-xs text-slate-500">Next step: add documents, then confirm items marked Needs Review.</p>
             </article>
@@ -773,7 +829,8 @@ export function WorkspaceApp() {
               <article className="rounded-lg border border-slate-200 bg-slate-50 p-3" data-testid="review-progress">
                 <p className="text-xs text-slate-600">
                   Review progress: {reviewSummary.confirmed} confirmed, {reviewSummary.needs_review} needs review,{" "}
-                  {reviewSummary.excluded} excluded, {reviewSummary.tax_agent_review} tax agent review.
+                  {reviewSummary.excluded} excluded, {reviewSummary.tax_agent_review} tax agent review,{" "}
+                  {reviewSummary.manual_review_documents ?? 0} document blockers.
                 </p>
               </article>
             )}
@@ -838,6 +895,7 @@ export function WorkspaceApp() {
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <input
                   data-testid="documents-file-input"
+                  ref={fileInputRef}
                   type="file"
                   onChange={(e) => {
                     const file = e.target.files?.[0] ?? null;
@@ -956,66 +1014,65 @@ export function WorkspaceApp() {
               )}
             </div>
             <div className="rounded-lg border border-slate-200 p-3" data-testid="processing-queue-panel">
-              <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-2 text-left"
+                onClick={() => setQueueCollapsed((v) => !v)}
+              >
                 <p className="text-xs font-medium text-slate-700">Processing Queue</p>
-                <button
-                  type="button"
-                  className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
-                  onClick={() => setQueueCollapsed((v) => !v)}
-                >
-                  {queueCollapsed ? "Expand" : "Collapse"}
-                </button>
+                <span className={`text-xs text-slate-500 transition-transform ${queueCollapsed ? "" : "rotate-180"}`}>⌄</span>
+              </button>
+              <div className={`overflow-hidden transition-all duration-200 ${queueCollapsed ? "max-h-0" : "max-h-[900px]"}`}>
+                <p className="mt-1 text-xs text-slate-500">
+                  OCR and classification run in the background. Refresh status to see latest progress.
+                </p>
+                {!jobsLoading && jobs.length === 0 && <p className="mt-2 text-xs text-slate-500">No processing jobs yet.</p>}
+                {jobsLoading && <p className="mt-2 text-xs text-slate-500">Loading processing status…</p>}
+                <div className="mt-2 space-y-2">
+                  {(showAllJobs ? jobs : jobs.slice(0, 4)).map((job) => (
+                    <div key={job.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                      <p className="font-medium text-slate-700">{job.job_type.replaceAll("_", " ")}</p>
+                      <p className="text-slate-500">
+                        Status: <span className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700">{job.status}</span>
+                      </p>
+                      {job.progress_message && <p className="text-slate-500">{job.progress_message}</p>}
+                      {job.error_message && <p className="text-amber-700">{job.error_message}</p>}
+                    </div>
+                  ))}
+                  {jobs.length > 4 && (
+                    <button
+                      type="button"
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                      onClick={() => setShowAllJobs((v) => !v)}
+                    >
+                      {showAllJobs ? "Show less" : `Show more (${jobs.length - 4})`}
+                    </button>
+                  )}
+                </div>
               </div>
-              <p className="mt-1 text-xs text-slate-500">
-                OCR and classification run in the background. Refresh status to see latest progress.
-              </p>
-              {!queueCollapsed && jobsLoading && <p className="mt-2 text-xs text-slate-500">Loading processing status…</p>}
-              {!queueCollapsed && !jobsLoading && jobs.length === 0 && <p className="mt-2 text-xs text-slate-500">No processing jobs yet.</p>}
-              {!queueCollapsed && (
-              <div className="mt-2 space-y-2">
-                {(showAllJobs ? jobs : jobs.slice(0, 4)).map((job) => (
-                  <div key={job.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-                    <p className="font-medium text-slate-700">{job.job_type.replaceAll("_", " ")}</p>
-                    <p className="text-slate-500">
-                      Status: <span className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700">{job.status}</span>
-                    </p>
-                    {job.progress_message && <p className="text-slate-500">{job.progress_message}</p>}
-                    {job.error_message && <p className="text-amber-700">{job.error_message}</p>}
-                  </div>
-                ))}
-                {jobs.length > 4 && (
-                  <button
-                    type="button"
-                    className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
-                    onClick={() => setShowAllJobs((v) => !v)}
-                  >
-                    {showAllJobs ? "Show less" : `Show more (${jobs.length - 4})`}
-                  </button>
-                )}
-              </div>
-              )}
             </div>
             <div className="rounded-lg border border-slate-200 p-3">
-              <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-2 text-left"
+                onClick={() => setDocumentsCollapsed((v) => !v)}
+              >
                 <p className="text-xs font-medium text-slate-700">Workspace Documents</p>
-                <button
-                  type="button"
-                  className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
-                  onClick={() => setDocumentsCollapsed((v) => !v)}
-                >
-                  {documentsCollapsed ? "Expand" : "Collapse"}
-                </button>
-              </div>
-              {documentsError && (
-                <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">{documentsError}</p>
-              )}
-              {!documentsCollapsed && documentsLoading && <p className="mt-2 text-xs text-slate-500">Loading documents…</p>}
-              {!documentsCollapsed && (
+                <span className={`text-xs text-slate-500 transition-transform ${documentsCollapsed ? "" : "rotate-180"}`}>⌄</span>
+              </button>
+              <div className={`overflow-hidden transition-all duration-200 ${documentsCollapsed ? "max-h-0" : "max-h-[1200px]"}`}>
+              {documentsLoading && <p className="mt-2 text-xs text-slate-500">Loading documents…</p>}
+              {!documentsLoading && (
               <div className="mt-2 space-y-2">
                 {(showAllDocuments ? documents : documents.slice(0, 5)).map((doc) => (
                   <article
                     key={doc.id}
-                    className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
+                    ref={(el) => {
+                      documentRowRefs.current[doc.id] = el;
+                    }}
+                    className={`rounded-md border px-3 py-2 text-xs text-slate-700 transition-colors ${
+                      highlightDocumentId === doc.id ? "border-emerald-300 bg-emerald-50" : "border-slate-200 bg-slate-50"
+                    }`}
                     data-testid="document-row"
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -1024,12 +1081,16 @@ export function WorkspaceApp() {
                         {outcomeLabel(doc.status)}
                       </span>
                     </div>
-                    <p className="mt-1 text-slate-500">{doc.created_at}</p>
+                    <p className="mt-1 text-slate-500">{formatDateTime(doc.created_at)}</p>
                     <p className="mt-1 text-slate-500">
-                      Items: {doc.item_count ?? 0} · Provider mode: {doc.provider_mode ?? "mock"}
+                      Items: {doc.item_count ?? 0} · Provider mode: {doc.provider_mode ?? "manual"}
                     </p>
-                    {doc.status_reason && (
-                      <p className="mt-1 text-slate-500">{doc.status_reason}</p>
+                    <p className="mt-1 text-slate-500">
+                      OCR: {doc.extraction_status ?? "pending"} ({doc.extraction_text_length ?? 0} chars) · Classification: {doc.classification_status ?? "pending"}
+                      {doc.classification_provider ? ` via ${doc.classification_provider}` : ""}
+                    </p>
+                    {friendlyStatusReason(doc.status_reason) && (
+                      <p className="mt-1 text-slate-500">{friendlyStatusReason(doc.status_reason)}</p>
                     )}
                     {doc.status === "duplicate_detected" && (
                       <div className="mt-1">
@@ -1058,19 +1119,40 @@ export function WorkspaceApp() {
                       </p>
                     )}
                     {toProcessingOutcome(doc.status) === "failed" && (
-                      <div className="mt-1">
-                        <p className="text-amber-700">Processing could not complete for this file.</p>
-                        {doc.retryable ? (
-                          <button
-                            type="button"
-                            className="mt-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
-                            onClick={() => setMessage(`Try again: choose ${doc.original_filename} and upload once more.`)}
-                          >
-                            Try again
-                          </button>
-                        ) : (
-                          <p className="mt-1 text-slate-500">This file needs manual review. Re-upload may not change the outcome.</p>
-                        )}
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                          onClick={() => {
+                            setMessage(`Retry: choose ${doc.original_filename} and upload again.`);
+                            fileInputRef.current?.focus();
+                          }}
+                        >
+                          Retry processing
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                          onClick={() => {
+                            setMessage(`Replace document: choose ${doc.original_filename} and upload again.`);
+                            fileInputRef.current?.focus();
+                          }}
+                        >
+                          Replace document
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                          onClick={async () => {
+                            const confirmed = window.confirm(`Delete failed document "${doc.original_filename}"?`);
+                            if (!confirmed) return;
+                            await api.deleteWorkspaceDocument(doc.id);
+                            await refreshDocumentsAndJobs();
+                            showToast("Failed document deleted.");
+                          }}
+                        >
+                          Delete failed document
+                        </button>
                       </div>
                     )}
                   </article>
@@ -1090,6 +1172,10 @@ export function WorkspaceApp() {
                   </p>
                 )}
               </div>
+              )}
+              </div>
+              {documentsError && (
+                <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">{documentsError}</p>
               )}
             </div>
           </div>
@@ -1127,8 +1213,76 @@ export function WorkspaceApp() {
             <div className="space-y-2">
               {reviewSummary && (
                 <p className="text-xs text-slate-500">
-                  {reviewSummary.confirmed} confirmed · {reviewSummary.needs_review} need review · {reviewSummary.excluded} excluded · {reviewSummary.tax_agent_review} tax agent review
+                  {reviewSummary.confirmed} confirmed · {reviewSummary.needs_review} need review · {reviewSummary.excluded} excluded · {reviewSummary.tax_agent_review} tax agent review · {reviewSummary.manual_review_documents ?? 0} document blockers
                 </p>
+              )}
+              {manualReviewDocuments.length > 0 && (
+                <div className="space-y-2" data-testid="manual-review-documents">
+                  <p className="text-xs font-medium text-slate-700">Documents needing manual review</p>
+                  {manualReviewDocuments.map((doc) => (
+                    <article key={doc.id} className="rounded-lg border border-amber-200 bg-amber-50 p-3" data-testid="manual-review-document-card">
+                      <p className="text-sm font-medium text-slate-800">{doc.filename}</p>
+                      <p className="mt-1 text-xs text-slate-600">
+                        Outcome: {outcomeLabel(doc.status)} · Provider: {doc.provider_mode} · Status: {friendlyStatusReason(doc.status_reason) ?? "Needs manual review"}
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <StatusActionButton
+                          onClick={async () => {
+                            if (!selectedWorkspaceId) return;
+                            await api.createWorkspaceManualItem(selectedWorkspaceId, doc.id, {
+                              description: `Manual review item for ${doc.filename}`,
+                              review_status: "needs_review",
+                              item_type: "needs_review",
+                              category: "needs_review",
+                            });
+                            await refreshReviewData(selectedWorkspaceId, reviewFilter);
+                            await refreshDocumentsAndJobs();
+                            showToast("Manual review item added.");
+                          }}
+                        >
+                          Add manual item
+                        </StatusActionButton>
+                        <StatusActionButton
+                          onClick={async () => {
+                            if (!selectedWorkspaceId) return;
+                            await api.applyWorkspaceManualReviewAction(selectedWorkspaceId, doc.id, "exclude_document");
+                            await refreshReviewData(selectedWorkspaceId, reviewFilter);
+                            await refreshDocumentsAndJobs();
+                            showToast("Document excluded from review pack.");
+                          }}
+                        >
+                          Mark document excluded
+                        </StatusActionButton>
+                        <StatusActionButton
+                          onClick={async () => {
+                            if (!selectedWorkspaceId) return;
+                            await api.applyWorkspaceManualReviewAction(selectedWorkspaceId, doc.id, "tax_agent_review");
+                            await api.createWorkspaceManualItem(selectedWorkspaceId, doc.id, {
+                              description: `Tax agent review needed for ${doc.filename}`,
+                              review_status: "tax_agent_review",
+                              item_type: "needs_review",
+                              category: "needs_review",
+                            });
+                            await refreshReviewData(selectedWorkspaceId, reviewFilter);
+                            await refreshDocumentsAndJobs();
+                            showToast("Sent to Tax Agent Review.");
+                          }}
+                        >
+                          Send to Tax Agent Review
+                        </StatusActionButton>
+                        <StatusActionButton
+                          onClick={() => {
+                            setActiveNav("Documents");
+                            setDocumentsCollapsed(false);
+                            setPendingScrollDocumentId(doc.id);
+                          }}
+                        >
+                          View document
+                        </StatusActionButton>
+                      </div>
+                    </article>
+                  ))}
+                </div>
               )}
               {reviewItems.map((item) => (
                 <article key={item.id} className="rounded-lg border border-slate-200 p-3" data-testid="review-item-row">
@@ -1160,7 +1314,7 @@ export function WorkspaceApp() {
               ))}
               {reviewItems.length === 0 && (
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  <p>No items for this filter yet.</p>
+                  <p>No extracted items yet. Review the documents below or add a manual item.</p>
                   {(reviewSummary?.total_items ?? 0) === 0 && hasAnyDocuments && (
                     <p className="mt-1">Documents exist but no items were extracted yet. Open Documents to review processing outcomes.</p>
                   )}
@@ -1336,7 +1490,7 @@ export function WorkspaceApp() {
                 <div key={e.id} className="flex items-center justify-between rounded-md border border-slate-200 p-2 text-xs">
                   <div>
                     <p>{e.filename ?? e.id}</p>
-                    <p className="text-slate-500">{e.created_at}</p>
+                    <p className="text-slate-500">{formatDateTime(e.created_at)}</p>
                     <p className="text-slate-500">
                       {e.file_size ?? 0} bytes · sha256 {e.sha256 ? `${e.sha256.slice(0, 12)}...` : "n/a"} · {e.kdf ?? "kdf-n/a"}
                     </p>
@@ -1351,7 +1505,7 @@ export function WorkspaceApp() {
                         Copy checksum
                       </button>
                     )}
-                    {e.downloaded_at && <p className="text-slate-500">Downloaded: {e.downloaded_at}</p>}
+                    {e.downloaded_at && <p className="text-slate-500">Downloaded: {formatDateTime(e.downloaded_at)}</p>}
                   </div>
                   <div className="flex gap-2">
                     <button
@@ -1504,7 +1658,7 @@ export function WorkspaceApp() {
           <button
             className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs"
             onClick={async () => {
-              await api.authLogout();
+              await api.authLock();
               setAuthState("LOCKED");
             }}
           >
@@ -1520,21 +1674,20 @@ export function WorkspaceApp() {
           )}
         </div>
         <div className="mt-4">
-          <div className="flex items-center justify-between">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between"
+            onClick={() => setActivityCollapsed((v) => !v)}
+          >
             <h4 className="text-xs font-semibold text-slate-700">Recent Activity</h4>
-            <button
-              type="button"
-              className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
-              onClick={() => setActivityCollapsed((v) => !v)}
-            >
-              {activityCollapsed ? "Expand" : "Collapse"}
-            </button>
-          </div>
-          {!activityCollapsed && <div className="mt-2 space-y-2" data-testid="audit-events-panel">
+            <span className={`text-xs text-slate-500 transition-transform ${activityCollapsed ? "" : "rotate-180"}`}>⌄</span>
+          </button>
+          <div className={`overflow-hidden transition-all duration-200 ${activityCollapsed ? "max-h-0" : "max-h-[900px]"}`}>
+          <div className="mt-2 space-y-2" data-testid="audit-events-panel">
             {(showAllActivity ? auditEvents : auditEvents.slice(0, 5)).map((event) => (
               <div key={event.id} className="rounded-md border border-slate-200 p-2 text-[11px] text-slate-600">
                 <p className="font-medium text-slate-700">{event.action.replaceAll("_", " ")}</p>
-                <p className="text-slate-500">{event.created_at}</p>
+                <p className="text-slate-500">{formatDateTime(event.created_at)}</p>
               </div>
             ))}
             {auditEvents.length > 5 && (
@@ -1547,7 +1700,8 @@ export function WorkspaceApp() {
               </button>
             )}
             {auditEvents.length === 0 && <p className="text-[11px] text-slate-500">No recent audit events.</p>}
-          </div>}
+          </div>
+          </div>
         </div>
       </aside>
     </div>

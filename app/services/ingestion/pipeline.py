@@ -36,6 +36,10 @@ from app.services.security.field_encryption import (
 from app.ai.providers.base import AIProviderConfigurationError
 from app.services.classification import PROVIDER_NOT_CONFIGURED_MESSAGE
 
+CLASSIFICATION_NEEDS_SETUP_MESSAGE = "Text extracted; AI classification needs setup/manual review."
+OCR_NO_TEXT_MESSAGE = "OCR returned no text."
+CLASSIFICATION_FAILED_MESSAGE = "Text extracted, but classification failed. Manual review required."
+
 
 @dataclass
 class UploadResult:
@@ -93,6 +97,11 @@ async def process_upload(
 
     doc.status = status
     doc.status_reason = status_reason
+    doc.extraction_status = "pending"
+    doc.extraction_text_length = 0
+    doc.classification_status = "pending"
+    doc.classification_provider = None
+    doc.classification_error = None
     await db.flush()
     await write_audit(
         db, "document", doc.id, "uploaded",
@@ -166,6 +175,11 @@ async def _run_ocr_pipeline(
                                  progress_message="Extracting text...")
 
     ocr_result = await extract_text(file_data, mime_type)
+    extracted_text = ocr_result.full_text or ""
+    extracted_len = len(extracted_text)
+    doc.extraction_text_length = extracted_len
+    doc.extraction_status = "extracted" if extracted_text.strip() else "no_text"
+    doc.extracted_text_hash = hashlib.sha256(extracted_text.encode()).hexdigest() if extracted_text else None
     field_key = await _get_session_field_key(db, doc.session_id)
     if not field_key:
         await write_audit(
@@ -209,16 +223,18 @@ async def _run_ocr_pipeline(
                       details={
                           "method": ocr_result.method,
                           "pages": len(ocr_result.pages),
-                          "total_chars": len(ocr_result.full_text),
+                          "total_chars": extracted_len,
                       })
 
     await job_repo.update_status(job_id, "running", progress=0.6,
                                  progress_message=f"OCR complete: {len(ocr_result.pages)} pages")
 
     # If OCR returned no text, flag for review
-    if not ocr_result.full_text.strip():
+    if not extracted_text.strip():
         doc.status = "needs_review"
-        doc.status_reason = "OCR returned no text — document may be unreadable."
+        doc.status_reason = OCR_NO_TEXT_MESSAGE
+        doc.classification_status = "pending"
+        doc.classification_error = "No extractable text from OCR."
         await db.flush()
         await write_audit(db, "document", doc.id, "needs_review",
                           details={"reason": "OCR returned empty text"})
@@ -231,13 +247,13 @@ async def _run_ocr_pipeline(
     doc.status = "items_detected"
     await db.flush()
     await write_audit(db, "document", doc.id, "items_detected",
-                      details={"extracted_text_hash": hashlib.sha256(ocr_result.full_text.encode()).hexdigest()})
+                      details={"extracted_text_hash": doc.extracted_text_hash})
     await job_repo.update_status(job_id, "running", progress=0.8,
                                  progress_message="Text extracted — running classification...")
 
     # Step 4: auto-classify the extracted text using the configured AI provider
     await _run_classification(
-        db, doc, ocr_result.full_text, job_repo, job_id,
+        db, doc, extracted_text, job_repo, job_id,
     )
 
 
@@ -258,6 +274,16 @@ async def _run_classification(
 
     await job_repo.update_status(job_id, "running", progress=0.9,
                                  progress_message="Classification in progress...")
+    try:
+        from app.ai.factory import get_provider
+
+        provider_name = type(get_provider()).__name__.replace("Provider", "").lower()
+    except Exception:
+        provider_name = (settings.ai_provider or "unknown").lower()
+    doc.classification_provider = provider_name or None
+    doc.classification_status = "pending"
+    doc.classification_error = None
+    await db.flush()
 
     try:
         fy = doc.financial_year
@@ -284,6 +310,8 @@ async def _run_classification(
             # for review workflow purposes. Keep the document visible as manual review.
             doc.status = "needs_review"
             doc.status_reason = "Classification produced no items — manual review required."
+            doc.classification_status = "needs_review"
+            doc.classification_error = "Classification produced no items."
             await db.flush()
             await write_audit(
                 db,
@@ -303,6 +331,8 @@ async def _run_classification(
 
         doc.status = "classified"
         doc.status_reason = None
+        doc.classification_status = "classified"
+        doc.classification_error = None
         await db.flush()
         await write_audit(db, "document", doc.id, "classified",
                           details={
@@ -319,7 +349,9 @@ async def _run_classification(
 
     except AIProviderConfigurationError:
         doc.status = "needs_review"
-        doc.status_reason = PROVIDER_NOT_CONFIGURED_MESSAGE
+        doc.status_reason = CLASSIFICATION_NEEDS_SETUP_MESSAGE
+        doc.classification_status = "not_configured"
+        doc.classification_error = PROVIDER_NOT_CONFIGURED_MESSAGE
         await db.flush()
         await write_audit(
             db,
@@ -332,13 +364,15 @@ async def _run_classification(
             job_id,
             "succeeded",
             progress=1.0,
-            progress_message=PROVIDER_NOT_CONFIGURED_MESSAGE,
+            progress_message=CLASSIFICATION_NEEDS_SETUP_MESSAGE,
             result_summary='{"status":"needs_review","reason":"provider_not_configured"}',
         )
         return
     except Exception as exc:
         doc.status = "classification_failed"
-        doc.status_reason = f"{type(exc).__name__}: {exc}"
+        doc.status_reason = CLASSIFICATION_FAILED_MESSAGE
+        doc.classification_status = "failed"
+        doc.classification_error = f"{type(exc).__name__}: {exc}"
         await db.flush()
         await write_audit(db, "document", doc.id, "classification_failed",
                           details={"error": str(exc)})
