@@ -33,6 +33,8 @@ from app.services.security.field_encryption import (
     DEFAULT_KEY_VERSION,
     EncryptionKeyUnavailableError,
 )
+from app.ai.providers.base import AIProviderConfigurationError
+from app.services.classification import PROVIDER_NOT_CONFIGURED_MESSAGE
 
 
 @dataclass
@@ -276,10 +278,32 @@ async def _run_classification(
             skill_context="Auto-classified from OCR pipeline.",
         )
 
+        first_item = items[0] if items else None
+        if not items:
+            # A no-item classification outcome is not a successful "classified" result
+            # for review workflow purposes. Keep the document visible as manual review.
+            doc.status = "needs_review"
+            doc.status_reason = "Classification produced no items — manual review required."
+            await db.flush()
+            await write_audit(
+                db,
+                "document",
+                doc.id,
+                "needs_review",
+                details={"reason": "classification_produced_no_items"},
+            )
+            await job_repo.update_status(
+                job_id,
+                "succeeded",
+                progress=1.0,
+                progress_message="No review items detected — manual review required",
+                result_summary='{"status":"needs_review","reason":"classification_produced_no_items","item_count":0}',
+            )
+            return
+
         doc.status = "classified"
         doc.status_reason = None
         await db.flush()
-        first_item = items[0] if items else None
         await write_audit(db, "document", doc.id, "classified",
                           details={
                               "item_count": len(items),
@@ -293,6 +317,25 @@ async def _run_classification(
                                      progress_message=f"{len(items)} items classified",
                                      result_summary=f'{{"status": "classified", "item_count": {len(items)}, "first_item_id": "{first_item.id if first_item else ""}", "first_category": "{first_item.category if first_item else ""}"}}')
 
+    except AIProviderConfigurationError:
+        doc.status = "needs_review"
+        doc.status_reason = PROVIDER_NOT_CONFIGURED_MESSAGE
+        await db.flush()
+        await write_audit(
+            db,
+            "document",
+            doc.id,
+            "needs_review",
+            details={"reason": "provider_not_configured"},
+        )
+        await job_repo.update_status(
+            job_id,
+            "succeeded",
+            progress=1.0,
+            progress_message=PROVIDER_NOT_CONFIGURED_MESSAGE,
+            result_summary='{"status":"needs_review","reason":"provider_not_configured"}',
+        )
+        return
     except Exception as exc:
         doc.status = "classification_failed"
         doc.status_reason = f"{type(exc).__name__}: {exc}"

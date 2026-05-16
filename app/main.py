@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import engine
 from app.db.base import Base
 from app.db.deps import get_db
+from app.ai.factory import provider_config_warning
 from app.routers import audit, jobs, monitoring, auth, workspaces, legacy
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
@@ -87,10 +88,14 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict:
         db_ok = True
     except Exception:
         db_ok = False
+    provider_warning = provider_config_warning()
     return {
         "status": "ok" if db_ok else "degraded",
         "product": "tax-return-ai",
         "database": "connected" if db_ok else "disconnected",
+        "ai_provider": os.getenv("AI_PROVIDER", "mock"),
+        "ai_configured": provider_warning is None,
+        "ai_warning": provider_warning,
     }
 
 

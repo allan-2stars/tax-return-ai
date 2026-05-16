@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import json
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, Form, Query, Request
 from fastapi.responses import Response
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db
@@ -17,6 +17,7 @@ from app.models.user import User
 from app.models.tax_workspace import TaxWorkspace
 from app.models.audit_log import AuditLog
 from app.models.classification_result import ClassificationResultModel
+from app.models.document_item import DocumentItem
 from app.schemas.workspace import WorkspaceCreateRequest, WorkspaceResponse
 from app.schemas.document import DocumentPageResponse
 from app.services.auth.service import seed_default_workspaces
@@ -223,11 +224,77 @@ async def list_workspace_documents(
     result = await db.execute(
         select(Document).where(Document.session_id == session.id).order_by(Document.created_at.desc())
     )
+    docs = result.scalars().all()
+
+    if not docs:
+        await db.commit()
+        return []
+
+    doc_ids = [d.id for d in docs]
+    item_counts_result = await db.execute(
+        select(DocumentItem.document_id, func.count(DocumentItem.id))
+        .where(DocumentItem.document_id.in_(doc_ids))
+        .group_by(DocumentItem.document_id)
+    )
+    item_counts = {doc_id: count for doc_id, count in item_counts_result.all()}
+
+    provider_rows = await db.execute(
+        select(ClassificationResultModel.document_id, ClassificationResultModel.provider_name)
+        .where(ClassificationResultModel.document_id.in_(doc_ids))
+        .order_by(ClassificationResultModel.created_at.desc())
+    )
+    provider_mode_by_doc: dict[str, str] = {}
+    for doc_id, provider_name in provider_rows.all():
+        if doc_id in provider_mode_by_doc:
+            continue
+        provider_lower = (provider_name or "").lower()
+        if "mock" in provider_lower:
+            provider_mode_by_doc[doc_id] = "mock"
+        elif "manual" in provider_lower:
+            provider_mode_by_doc[doc_id] = "manual"
+        elif "local" in provider_lower:
+            provider_mode_by_doc[doc_id] = "local"
+        else:
+            provider_mode_by_doc[doc_id] = "cloud"
+
+    payload = []
+    for doc in docs:
+        status_reason = doc.status_reason or ""
+        retryable = False
+        if doc.status in {"classification_failed", "extraction_failed", "failed"}:
+            lower_reason = status_reason.lower()
+            retryable = any(t in lower_reason for t in ["temporary", "timeout", "network", "unavailable", "try again"])
+            if not status_reason:
+                retryable = True
+        provider_mode = provider_mode_by_doc.get(doc.id)
+        if not provider_mode and doc.status == "needs_review":
+            provider_mode = "manual"
+        if not provider_mode:
+            provider_mode = "mock"
+        payload.append(
+            {
+                "id": doc.id,
+                "session_id": doc.session_id,
+                "original_filename": doc.original_filename,
+                "mime_type": doc.mime_type,
+                "file_size_bytes": doc.file_size_bytes,
+                "file_hash": doc.file_hash,
+                "category": doc.category,
+                "financial_year": doc.financial_year,
+                "status": doc.status,
+                "status_reason": doc.status_reason,
+                "created_at": doc.created_at,
+                "updated_at": doc.updated_at,
+                "item_count": item_counts.get(doc.id, 0),
+                "provider_mode": provider_mode,
+                "retryable": retryable,
+            }
+        )
     await db.commit()
-    return result.scalars().all()
+    return payload
 
 
-@router.post("/{workspace_id}/documents/upload")
+@router.post("/{workspace_id}/documents/upload", status_code=202)
 async def upload_workspace_document(
     workspace_id: str,
     request: Request,

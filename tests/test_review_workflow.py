@@ -143,3 +143,29 @@ async def test_review_summary_blocks_and_allows_export(async_client, db_session)
     ready_payload = ready.json()
     assert ready_payload['ready_for_export'] is True
     assert ready_payload['confirmed'] == 1
+
+
+async def test_review_summary_matches_workspace_item_list_counts(async_client, db_session):
+    workspace_id = await _setup_workspace(async_client)
+    ensure = await async_client.get(f'/api/workspaces/{workspace_id}/items')
+    assert ensure.status_code == 200
+    session = await _get_workspace_session(db_session, workspace_id)
+
+    for item in [
+        TaxItem(session_id=session.id, item_type='deduction', category='tools_equipment', amount=10, description='a', needs_review=True, review_status='needs_review'),
+        TaxItem(session_id=session.id, item_type='deduction', category='tools_equipment', amount=11, description='b', needs_review=True, review_status='needs_review'),
+        TaxItem(session_id=session.id, item_type='deduction', category='tools_equipment', amount=12, description='c', needs_review=False, review_status='confirmed'),
+    ]:
+        db_session.add(item)
+    await db_session.commit()
+
+    summary = await async_client.get(f'/api/workspaces/{workspace_id}/review-summary')
+    assert summary.status_code == 200
+    summary_payload = summary.json()
+    assert summary_payload['needs_review'] == 2
+
+    filtered = await async_client.get(f'/api/workspaces/{workspace_id}/items?review_status=needs_review')
+    assert filtered.status_code == 200
+    filtered_items = filtered.json()
+    assert len(filtered_items) == 2
+    assert summary_payload['needs_review'] == len(filtered_items)

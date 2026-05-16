@@ -36,9 +36,21 @@ ALLOWED_MIME_TYPES = {
     "application/pdf",
     "image/png",
     "image/jpeg",
-    "image/tiff",
+    "text/csv",
+    "text/plain",
 }
-ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif"}
+ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".csv", ".txt"}
+
+
+def _upload_error(status_code: int, code: str, message: str, retryable: bool) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+        },
+    )
 
 
 @router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
@@ -87,24 +99,32 @@ async def upload_document(
     # Read file bytes
     file_data = await file.read()
     if not file_data:
-        raise HTTPException(status_code=400, detail="Empty file")
+        raise _upload_error(
+            status.HTTP_400_BAD_REQUEST,
+            "empty_file",
+            "The selected file is empty.",
+            False,
+        )
 
     # Validate file type
     ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in ALLOWED_EXTENSIONS and file.content_type not in ALLOWED_MIME_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {ext or file.content_type}. "
-                   f"Allowed: PDF, PNG, JPG, TIFF",
+    normalized_content_type = (file.content_type or "").lower().split(";")[0].strip()
+    if ext not in ALLOWED_EXTENSIONS and normalized_content_type not in ALLOWED_MIME_TYPES:
+        raise _upload_error(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_file_type",
+            "Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, CSV, TXT.",
+            False,
         )
 
     # Validate file size (configurable via MAX_UPLOAD_SIZE_MB, default 20MB)
     max_size = getattr(settings, "max_upload_size_mb", 20) * 1024 * 1024
     if len(file_data) > max_size:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large ({len(file_data) / 1024 / 1024:.1f} MB). "
-                   f"Maximum: {max_size / 1024 / 1024:.0f} MB",
+        raise _upload_error(
+            status.HTTP_400_BAD_REQUEST,
+            "file_too_large",
+            f"File too large ({len(file_data) / 1024 / 1024:.1f} MB). Maximum: {max_size / 1024 / 1024:.0f} MB.",
+            False,
         )
 
     # Create initial document record with minimal metadata
@@ -127,18 +147,26 @@ async def upload_document(
                       details={"filename": file.filename, "size": len(file_data)})
 
     # Create a queued ingestion job
-    job = await create_job(
-        db=db,
-        session_id=session_id,
-        document_id=doc.id,
-        job_type="ingestion",
-        workspace_id=workspace_id,
-        user_id=owner_user_id,
-        requires_encryption=True,
-        capability_token=capability_token,
-        capability_expires_at=capability_expires_at,
-        payload={"stage": "ocr_classification"},
-    )
+    try:
+        job = await create_job(
+            db=db,
+            session_id=session_id,
+            document_id=doc.id,
+            job_type="ingestion",
+            workspace_id=workspace_id,
+            user_id=owner_user_id,
+            requires_encryption=True,
+            capability_token=capability_token,
+            capability_expires_at=capability_expires_at,
+            payload={"stage": "ocr_classification"},
+        )
+    except Exception:
+        raise _upload_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "temporary_processing_failure",
+            "Temporary processing failure. Please try again.",
+            True,
+        )
 
     await db.commit()
 

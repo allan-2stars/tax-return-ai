@@ -3,6 +3,14 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
+class AIProviderError(Exception):
+    """Base provider error."""
+
+
+class AIProviderConfigurationError(AIProviderError):
+    """Provider is not configured or credentials are invalid."""
+
+
 class ClassificationResult(dict):
     """Typed dict-like result from an AI classification.
 

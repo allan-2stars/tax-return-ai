@@ -318,3 +318,97 @@ async def test_password_reset_keeps_encrypted_data_access(async_client, db_sessi
     read = await async_client.get(f"/api/workspaces/{workspace_id}/items")
     assert read.status_code == 200
     assert any(i["description"] == "stable secret" for i in read.json())
+
+
+async def test_process_upload_marks_needs_review_when_classification_returns_no_items(
+    async_client, db_session, monkeypatch
+):
+    workspace_id = await _setup_workspace(async_client)
+    session, _token = await _session_and_token(async_client, db_session, workspace_id)
+
+    async def _empty_classify_document(**kwargs):
+        return []
+
+    monkeypatch.setattr("app.services.classification.classify_document", _empty_classify_document)
+
+    doc = Document(
+        session_id=session.id,
+        original_filename="empty-classification.txt",
+        mime_type="text/plain",
+        file_size_bytes=len(b"salary 1000"),
+        status="uploaded",
+        financial_year=session.financial_year,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = Job(session_id=session.id, document_id=doc.id, job_type="ingestion", status="queued")
+    db_session.add(job)
+    await db_session.flush()
+
+    result = await process_upload(
+        db=db_session,
+        document_id=doc.id,
+        job_id=job.id,
+        session_id=session.id,
+        original_filename=doc.original_filename,
+        mime_type=doc.mime_type,
+        file_data=b"salary 1000",
+        financial_year=session.financial_year,
+    )
+    await db_session.commit()
+    await db_session.refresh(result.document)
+    await db_session.refresh(job)
+
+    assert result.document.status == "needs_review"
+    assert "Classification produced no items" in (result.document.status_reason or "")
+    assert job.status == "succeeded"
+    assert "classification_produced_no_items" in (job.result_summary or "")
+
+
+async def test_missing_anthropic_key_does_not_create_provider_error_tax_item(
+    async_client, db_session, monkeypatch
+):
+    workspace_id = await _setup_workspace(async_client)
+    session, _token = await _session_and_token(async_client, db_session, workspace_id)
+
+    monkeypatch.setattr(settings, "ai_provider", "anthropic")
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+
+    doc = Document(
+        session_id=session.id,
+        original_filename="provider-missing-key.txt",
+        mime_type="text/plain",
+        file_size_bytes=len(b"salary 1000"),
+        status="uploaded",
+        financial_year=session.financial_year,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    job = Job(session_id=session.id, document_id=doc.id, job_type="ingestion", status="queued")
+    db_session.add(job)
+    await db_session.flush()
+
+    result = await process_upload(
+        db=db_session,
+        document_id=doc.id,
+        job_id=job.id,
+        session_id=session.id,
+        original_filename=doc.original_filename,
+        mime_type=doc.mime_type,
+        file_data=b"salary 1000",
+        financial_year=session.financial_year,
+    )
+    await db_session.commit()
+    await db_session.refresh(result.document)
+    await db_session.refresh(job)
+
+    assert result.document.status == "needs_review"
+    assert result.document.status_reason == "AI classification is not configured. Document needs manual review."
+    assert job.status == "succeeded"
+    assert "provider_not_configured" in (job.result_summary or "")
+
+    rows = await db_session.execute(select(TaxItem).where(TaxItem.session_id == session.id))
+    items = rows.scalars().all()
+    assert len(items) == 0

@@ -262,6 +262,26 @@ class TestJobService:
         assert result["status"] == "failed"
         assert "ValueError: OCR failed" in (result["error_message"] or "")
 
+    async def test_run_job_sync_preserves_terminal_status_set_by_job(self, db_session):
+        sid = await self._create_session(db_session)
+        created = await create_job(db_session, sid, None, "ingestion")
+
+        async def task_sets_custom_status():
+            repo = JobRepository(db_session)
+            await repo.update_status(
+                created["id"],
+                "succeeded",
+                progress=1.0,
+                progress_message="No review items detected — manual review required",
+                result_summary='{"status":"needs_review","reason":"classification_produced_no_items","item_count":0}',
+            )
+            return {"status": "ignored-by-wrapper"}
+
+        result = await run_job_sync(db_session, created["id"], task_sets_custom_status)
+        assert result["status"] == "succeeded"
+        assert result["progress_message"] == "No review items detected — manual review required"
+        assert "classification_produced_no_items" in (result["result_summary"] or "")
+
     async def test_list_jobs_for_session(self, db_session):
         sid = await self._create_session(db_session)
         await create_job(db_session, sid, None, "ingestion")

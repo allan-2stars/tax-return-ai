@@ -5,6 +5,39 @@
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010";
 
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  retryable?: boolean;
+
+  constructor(message: string, status: number, code?: string, retryable?: boolean) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+
+function parseApiErrorPayload(raw: unknown): { code?: string; message?: string; retryable?: boolean } {
+  if (raw && typeof raw === "object") {
+    const detail = (raw as { detail?: unknown }).detail;
+    if (detail && typeof detail === "object") {
+      return {
+        code: (detail as { code?: string }).code,
+        message: (detail as { message?: string }).message,
+        retryable: (detail as { retryable?: boolean }).retryable,
+      };
+    }
+    return {
+      code: (raw as { code?: string }).code,
+      message: (raw as { message?: string }).message,
+      retryable: (raw as { retryable?: boolean }).retryable,
+    };
+  }
+  return {};
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface Session {
@@ -27,7 +60,12 @@ export interface Document {
   category: string | null;
   financial_year: string;
   status: string;
+  status_reason?: string | null;
+  item_count?: number;
+  provider_mode?: "mock" | "local" | "cloud" | "manual";
+  retryable?: boolean;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface UploadResponse {
@@ -358,8 +396,20 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
   });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`API error ${res.status}: ${path} — ${body}`);
+    const bodyText = await res.text();
+    let payload: unknown = null;
+    try {
+      payload = bodyText ? JSON.parse(bodyText) : null;
+    } catch {
+      payload = null;
+    }
+    const parsed = parseApiErrorPayload(payload);
+    throw new ApiError(
+      parsed.message || `Request failed (${res.status}).`,
+      res.status,
+      parsed.code,
+      parsed.retryable
+    );
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
@@ -375,10 +425,66 @@ async function uploadFile(
     credentials: "include",
   });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Upload error ${res.status}: ${path} — ${body}`);
+    const bodyText = await res.text();
+    let payload: unknown = null;
+    try {
+      payload = bodyText ? JSON.parse(bodyText) : null;
+    } catch {
+      payload = null;
+    }
+    const parsed = parseApiErrorPayload(payload);
+    throw new ApiError(
+      parsed.message || `Upload failed (${res.status}).`,
+      res.status,
+      parsed.code,
+      parsed.retryable
+    );
   }
   return res.json() as Promise<UploadResponse>;
+}
+
+function uploadFileWithProgress(
+  path: string,
+  formData: FormData,
+  onProgress?: (percent: number) => void
+): Promise<UploadResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE_URL}${path}`);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      if (!onProgress || !event.lengthComputable) return;
+      const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
+      onProgress(percent);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as UploadResponse);
+        } catch (err) {
+          reject(err);
+        }
+        return;
+      }
+      let payload: unknown = null;
+      try {
+        payload = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+      } catch {
+        payload = null;
+      }
+      const parsed = parseApiErrorPayload(payload);
+      reject(
+        new ApiError(
+          parsed.message || `Upload failed (${xhr.status}).`,
+          xhr.status,
+          parsed.code,
+          parsed.retryable
+        )
+      );
+    };
+    xhr.onerror = () => reject(new ApiError("Network error during upload.", 0, "network_error", true));
+    xhr.send(formData);
+  });
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -426,6 +532,21 @@ export const api = {
     request<TaxItem[]>(
       `/api/workspaces/${workspaceId}/items${reviewStatus ? `?review_status=${reviewStatus}` : ""}`
     ),
+  listWorkspaceDocuments: (workspaceId: string) =>
+    request<Document[]>(`/api/workspaces/${workspaceId}/documents`),
+  uploadWorkspaceDocument: (
+    workspaceId: string,
+    file: File,
+    category?: string,
+    financialYear?: string,
+    onProgress?: (percent: number) => void
+  ) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (category) fd.append("category", category);
+    if (financialYear) fd.append("financial_year", financialYear);
+    return uploadFileWithProgress(`/api/workspaces/${workspaceId}/documents/upload`, fd, onProgress);
+  },
   setWorkspaceItemReviewStatus: (
     workspaceId: string,
     itemId: string,

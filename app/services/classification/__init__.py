@@ -14,7 +14,10 @@ import time as time_module
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.ai.factory import get_provider
-from app.ai.providers.base import ClassificationResult
+from app.ai.providers.base import (
+    ClassificationResult,
+    AIProviderConfigurationError,
+)
 from app.models.tax_item import TaxItem
 from app.models.document_item import DocumentItem
 from app.models.classification_result import ClassificationResultModel
@@ -33,6 +36,7 @@ from app.services.security.field_encryption import (
 CONFIDENCE_REVIEW_THRESHOLD = 0.7
 
 RETRYABLE_EXCEPTIONS = (TimeoutError, ConnectionError, ConnectionResetError)
+PROVIDER_NOT_CONFIGURED_MESSAGE = "AI classification is not configured. Document needs manual review."
 
 
 async def classify_document(
@@ -89,6 +93,34 @@ async def classify_document(
                     continue  # retry
                 # Last attempt failed — fall through to outer catch
                 raise
+    except AIProviderConfigurationError as exc:
+        processing_time_ms = round((time_module.monotonic() - start_time) * 1000)
+        failed_result = ClassificationResultModel(
+            document_id=document_id,
+            session_id=session_id,
+            provider_name=provider_name,
+            raw_input=None,
+            raw_input_enc=encrypt_text(extracted_text, field_key),
+            raw_output=None,
+            parsed_output=None,
+            confidence=None,
+            processing_time_ms=processing_time_ms,
+            success=False,
+            error_message=PROVIDER_NOT_CONFIGURED_MESSAGE,
+            model_version=None,
+        )
+        db.add(failed_result)
+        await db.flush()
+        await write_audit(
+            db, "classification_result", failed_result.id, "provider_not_configured",
+            details={
+                "document_id": document_id,
+                "provider": provider_name,
+                "processing_time_ms": processing_time_ms,
+            },
+        )
+        await db.commit()
+        raise
     except Exception as exc:
         # Save failed classification result
         processing_time_ms = round((time_module.monotonic() - start_time) * 1000)

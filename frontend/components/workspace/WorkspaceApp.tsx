@@ -2,10 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import React from "react";
-import Link from "next/link";
 import {
   api,
+  ApiError,
   type AppAuthState,
+  type Document,
+  type Job,
   type TaxItem,
   type Workspace,
   type WorkspaceExportRecord,
@@ -21,9 +23,23 @@ type ReviewFilter = "all" | "needs_review" | "confirmed" | "excluded" | "tax_age
 const NAV_ITEMS: NavItem[] = ["Dashboard", "Documents", "Review Items", "Issues", "Review Pack", "Settings"];
 const AUTH_EVENT_KEY = "taxai_auth_event";
 const LOCK_MESSAGE = "Workspace is locked. Unlock to view sensitive tax data.";
+const ALLOWED_UPLOAD_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".csv", ".txt"];
+const ALLOWED_UPLOAD_MIME_TYPES = ["application/pdf", "image/png", "image/jpeg", "text/csv", "text/plain"];
 
 function isLockedResponseError(err: unknown): boolean {
+  if (err instanceof ApiError) return err.status === 401 || err.status === 423;
   return err instanceof Error && (err.message.includes("API error 401") || err.message.includes("API error 423"));
+}
+
+function toProcessingOutcome(status: string): "uploaded" | "extracting" | "classifying" | "needs_review" | "classified" | "duplicate_detected" | "failed" {
+  if (status === "uploaded" || status === "stored") return "uploaded";
+  if (status === "extracting_text" || status === "text_extracted" || status === "ocr_required" || status === "ocr_completed") return "extracting";
+  if (status === "classifying" || status === "ready_for_classification") return "classifying";
+  if (status === "needs_review") return "needs_review";
+  if (status === "classified" || status === "reviewed" || status === "included_in_report" || status === "exported") return "classified";
+  if (status === "duplicate_detected") return "duplicate_detected";
+  if (status === "classification_failed" || status === "extraction_failed" || status === "failed") return "failed";
+  return "uploaded";
 }
 
 export function WorkspaceApp() {
@@ -42,6 +58,15 @@ export function WorkspaceApp() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
   const [reviewSummary, setReviewSummary] = useState<WorkspaceReviewSummary | null>(null);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [documentsError, setDocumentsError] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadingDocument, setUploadingDocument] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobsLoading, setJobsLoading] = useState(false);
   const [reviewItems, setReviewItems] = useState<TaxItem[]>([]);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
   const [exportPassword, setExportPassword] = useState("");
@@ -51,6 +76,33 @@ export function WorkspaceApp() {
   const [securityStatus, setSecurityStatus] = useState<WorkspaceSecurityStatus | null>(null);
   const [recoveryCopied, setRecoveryCopied] = useState(false);
   const [resetSuccessMessage, setResetSuccessMessage] = useState<string | null>(null);
+
+  const isAllowedUploadFile = (file: File): boolean => {
+    const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+    const type = (file.type || "").toLowerCase();
+    return ALLOWED_UPLOAD_EXTENSIONS.includes(ext) || ALLOWED_UPLOAD_MIME_TYPES.includes(type);
+  };
+
+  const refreshReviewData = async (workspaceId: string, filter: ReviewFilter) => {
+    try {
+      const [summary, items] = await Promise.all([
+        api.getWorkspaceReviewSummary(workspaceId),
+        api.listWorkspaceItems(workspaceId, filter === "all" ? undefined : filter),
+      ]);
+      setReviewSummary(summary);
+      setReviewItems(items);
+      setMessage(null);
+    } catch (err) {
+      setReviewSummary(null);
+      setReviewItems([]);
+      if (isLockedResponseError(err)) {
+        setAuthState("LOCKED");
+        localStorage.setItem(AUTH_EVENT_KEY, "locked");
+      }
+      setMessage(LOCK_MESSAGE);
+      throw err;
+    }
+  };
 
   useEffect(() => {
     const init = async () => {
@@ -134,10 +186,63 @@ export function WorkspaceApp() {
     if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
     void (async () => {
       try {
-        const summary = await api.getWorkspaceReviewSummary(selectedWorkspaceId);
-        setReviewSummary(summary);
+        await refreshReviewData(selectedWorkspaceId, reviewFilter);
       } catch {
-        setReviewSummary(null);
+        // handled in refreshReviewData
+      }
+    })();
+  }, [authState, selectedWorkspaceId, reviewFilter]);
+
+  useEffect(() => {
+    if (authState !== "UNLOCKED" || !selectedWorkspaceId || activeNav !== "Documents") return;
+    void (async () => {
+      setDocumentsLoading(true);
+      setDocumentsError(null);
+      try {
+        const docs = await api.listWorkspaceDocuments(selectedWorkspaceId);
+        setDocuments(docs);
+        if (docs.length > 0) {
+          setJobsLoading(true);
+          try {
+            const jobList = await api.listJobs(docs[0].session_id);
+            setJobs(jobList);
+          } catch {
+            setJobs([]);
+          } finally {
+            setJobsLoading(false);
+          }
+        } else {
+          setJobs([]);
+        }
+      } catch (err) {
+        if (isLockedResponseError(err)) {
+          setAuthState("LOCKED");
+          localStorage.setItem(AUTH_EVENT_KEY, "locked");
+        }
+        setDocuments([]);
+        setJobs([]);
+        setDocumentsError("Unable to load documents for this workspace.");
+        setMessage("Unable to load documents for this workspace.");
+      } finally {
+        setDocumentsLoading(false);
+      }
+    })();
+  }, [authState, selectedWorkspaceId, activeNav]);
+
+  useEffect(() => {
+    if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
+    void (async () => {
+      try {
+        const docs = await api.listWorkspaceDocuments(selectedWorkspaceId);
+        setDocuments(docs);
+        if (docs.length > 0) {
+          const jobList = await api.listJobs(docs[0].session_id);
+          setJobs(jobList);
+        } else {
+          setJobs([]);
+        }
+      } catch {
+        // Keep current view stable; detailed errors are handled in Documents panel.
       }
     })();
   }, [authState, selectedWorkspaceId]);
@@ -170,23 +275,6 @@ export function WorkspaceApp() {
     if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
     void (async () => {
       try {
-        const items = await api.listWorkspaceItems(
-          selectedWorkspaceId,
-          reviewFilter === "all" ? undefined : reviewFilter
-        );
-        setReviewItems(items);
-        setMessage(null);
-      } catch {
-        setReviewItems([]);
-        setMessage(LOCK_MESSAGE);
-      }
-    })();
-  }, [authState, selectedWorkspaceId, reviewFilter]);
-
-  useEffect(() => {
-    if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
-    void (async () => {
-      try {
         const history = await api.listWorkspaceReviewPacks(selectedWorkspaceId);
         setExportHistory(history);
       } catch {
@@ -196,9 +284,21 @@ export function WorkspaceApp() {
   }, [authState, selectedWorkspaceId]);
 
   const selectedWorkspace = workspaces.find((w) => w.id === selectedWorkspaceId) ?? workspaces[0];
-  const selectedWorkspaceRouteId = selectedWorkspace?.id ?? "";
-  const workspacePath = (section: "documents" | "items" | "issues" | "review-pack") =>
-    selectedWorkspaceRouteId ? `/${section}?workspace_id=${selectedWorkspaceRouteId}` : `/${section}`;
+  const navigateToNav = (target: NavItem) => {
+    if (typeof window !== "undefined") {
+      console.debug("[WorkspaceApp] nav-click", {
+        from_url: window.location.href,
+        target_nav: target,
+        selected_workspace_id: selectedWorkspace?.id ?? null,
+      });
+    }
+    if (!selectedWorkspace?.id) {
+      setMessage("No workspace selected. Choose a Tax Year Workspace to continue.");
+      return;
+    }
+    setActiveNav(target);
+    setMessage(null);
+  };
 
   const stepState = useMemo<{
     documents: StepStatus;
@@ -214,6 +314,45 @@ export function WorkspaceApp() {
     };
   }, [selectedWorkspace, reviewSummary]);
 
+  const refreshDocumentsAndJobs = async (): Promise<Document[]> => {
+    if (!selectedWorkspaceId) return [];
+    setDocumentsLoading(true);
+    setDocumentsError(null);
+    try {
+      const docs = await api.listWorkspaceDocuments(selectedWorkspaceId);
+      setDocuments(docs);
+      if (docs.length > 0) {
+        setJobsLoading(true);
+        try {
+          const jobList = await api.listJobs(docs[0].session_id);
+          setJobs(jobList);
+        } catch {
+          setJobs([]);
+        } finally {
+          setJobsLoading(false);
+        }
+      } else {
+        setJobs([]);
+      }
+      return docs;
+    } catch {
+      setDocuments([]);
+      setJobs([]);
+      setDocumentsError("Unable to refresh documents.");
+      return [];
+    } finally {
+      setDocumentsLoading(false);
+    }
+  };
+
+  const queuedOrRunningJobs = jobs.filter((j) => j.status === "queued" || j.status === "running" || j.status === "retrying").length;
+  const failedJobs = jobs.filter((j) => j.status === "failed").length;
+  const duplicateDocuments = documents.filter((d) => d.status === "duplicate_detected").length;
+  const failedDocuments = documents.filter((d) => d.status === "classification_failed" || d.status === "extraction_failed").length;
+  const manualReviewDocuments = documents.filter((d) => d.status === "needs_review").length;
+  const hasAnyDocuments = documents.length > 0;
+  const hasMockOrManualProvider = documents.some((d) => d.provider_mode === "mock" || d.provider_mode === "manual");
+
   const setItemStatus = async (
     itemId: string,
     status: "confirmed" | "needs_review" | "excluded" | "tax_agent_review"
@@ -221,12 +360,7 @@ export function WorkspaceApp() {
     if (!selectedWorkspaceId) return;
     try {
       await api.setWorkspaceItemReviewStatus(selectedWorkspaceId, itemId, status);
-      const [summary, items] = await Promise.all([
-        api.getWorkspaceReviewSummary(selectedWorkspaceId),
-        api.listWorkspaceItems(selectedWorkspaceId, reviewFilter === "all" ? undefined : reviewFilter),
-      ]);
-      setReviewSummary(summary);
-      setReviewItems(items);
+      await refreshReviewData(selectedWorkspaceId, reviewFilter);
       setMessage(null);
     } catch (err) {
       if (isLockedResponseError(err)) {
@@ -507,6 +641,13 @@ export function WorkspaceApp() {
 
         {activeNav === "Dashboard" && (
           <div className="space-y-3" data-testid="guided-steps">
+            <article className="rounded-lg border border-slate-200 bg-slate-50 p-3" data-testid="workspace-health-summary">
+              <p className="text-xs font-medium text-slate-700">Workspace Health</p>
+              <p className="mt-1 text-xs text-slate-600">
+                {documents.length} documents, {queuedOrRunningJobs} processing, {failedDocuments} failed, {duplicateDocuments} duplicates flagged, {manualReviewDocuments} manual review.
+              </p>
+              <p className="text-xs text-slate-500">Next step: add documents, then confirm items marked Needs Review.</p>
+            </article>
             {reviewSummary && (
               <article className="rounded-lg border border-slate-200 bg-slate-50 p-3" data-testid="review-progress">
                 <p className="text-xs text-slate-600">
@@ -519,32 +660,234 @@ export function WorkspaceApp() {
               title="Step 1: Add documents"
               status={stepState.documents}
               description="Upload payslips, statements, and receipts for this tax year."
-              action={<LinkButton href={workspacePath("documents")}>Open Documents</LinkButton>}
+              action={<NavActionButton onClick={() => navigateToNav("Documents")}>Open Documents</NavActionButton>}
             />
             <GuidedStep
               title="Step 2: Review extracted items"
               status={stepState.review}
               description="Confirm inferred income and deduction items before they are included in the review pack."
-              action={<LinkButton href={workspacePath("items")}>Open Review Items</LinkButton>}
+              action={<NavActionButton onClick={() => navigateToNav("Review Items")}>Open Review Items</NavActionButton>}
             />
             <GuidedStep
               title="Step 3: Resolve issues"
               status={stepState.issues}
               description="Resolve items marked Needs Review, Excluded, or Tax Agent Review."
-              action={<LinkButton href={workspacePath("issues")}>Open Issues</LinkButton>}
+              action={<NavActionButton onClick={() => navigateToNav("Issues")}>Open Issues</NavActionButton>}
             />
             <GuidedStep
               title="Step 4: Generate review pack"
               status={stepState.pack}
               description="Export the current workspace for human review and handoff."
-              action={<LinkButton href={workspacePath("review-pack")}>Open Review Pack</LinkButton>}
+              action={<NavActionButton onClick={() => navigateToNav("Review Pack")}>Open Review Pack</NavActionButton>}
               disabled={!reviewSummary?.ready_for_export}
             />
           </div>
         )}
 
+        {activeNav === "Documents" && (
+          <div className="space-y-3" data-testid="documents-panel">
+            <div className="rounded-lg border border-slate-200 p-3">
+              <p className="text-xs font-medium text-slate-700">Upload Document</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Add payslips, statements, or receipts to this workspace.
+              </p>
+              <div
+                className={`mt-3 rounded-md border border-dashed p-3 ${isDragActive ? "border-slate-500 bg-slate-50" : "border-slate-300 bg-white"}`}
+                data-testid="documents-dropzone"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragActive(true);
+                }}
+                onDragLeave={() => setIsDragActive(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragActive(false);
+                  const file = e.dataTransfer.files?.[0];
+                  if (!file) return;
+                  if (!isAllowedUploadFile(file)) {
+                    setMessage("Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, CSV, TXT.");
+                    return;
+                  }
+                  setUploadFile(file);
+                }}
+              >
+                <p className="text-xs text-slate-500">Drag and drop a file here, or choose one below.</p>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <input
+                  data-testid="documents-file-input"
+                  type="file"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null;
+                    if (!file) {
+                      setUploadFile(null);
+                      return;
+                    }
+                    if (!isAllowedUploadFile(file)) {
+                      setUploadFile(null);
+                      setMessage("Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, CSV, TXT.");
+                      return;
+                    }
+                    setUploadFile(file);
+                  }}
+                  className="text-xs text-slate-600 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-2 file:py-1 file:text-xs"
+                />
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700"
+                  onClick={() => void refreshDocumentsAndJobs()}
+                >
+                  Refresh status
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-300 bg-slate-900 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                  disabled={!selectedWorkspaceId || !uploadFile || uploadingDocument}
+                  onClick={async () => {
+                    if (!selectedWorkspaceId || !uploadFile) return;
+                    if (!isAllowedUploadFile(uploadFile)) {
+                      setMessage("Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, CSV, TXT.");
+                      return;
+                    }
+                    setUploadingDocument(true);
+                    setUploadProgress(0);
+                    try {
+                      const uploadedFileName = uploadFile.name;
+                      await api.uploadWorkspaceDocument(selectedWorkspaceId, uploadFile, "general", undefined, (percent) =>
+                        setUploadProgress(percent)
+                      );
+                      const refreshedDocs = await refreshDocumentsAndJobs();
+                      await refreshReviewData(selectedWorkspaceId, reviewFilter);
+                      const duplicateDoc = refreshedDocs.find((d) => d.status === "duplicate_detected");
+                      setUploadFile(null);
+                      if (duplicateDoc) {
+                        setMessage("Duplicate file detected. Review the document list and keep only the version you need.");
+                      } else {
+                        setMessage(`${uploadedFileName} uploaded. Processing has started.`);
+                      }
+                    } catch (err) {
+                      if (isLockedResponseError(err)) {
+                        setAuthState("LOCKED");
+                        localStorage.setItem(AUTH_EVENT_KEY, "locked");
+                        setMessage("Workspace is locked. Unlock to upload documents.");
+                      } else if (err instanceof ApiError) {
+                        if (err.code === "unsupported_file_type" || err.status === 415) {
+                          setMessage("Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, CSV, TXT.");
+                        } else if (err.code === "file_too_large") {
+                          setMessage(err.message);
+                        } else if (err.retryable || err.code === "temporary_processing_failure") {
+                          setMessage("Temporary processing failure. Try again.");
+                        } else {
+                          setMessage(err.message || "Upload failed.");
+                        }
+                      } else {
+                        setMessage("Upload failed. Please try again.");
+                      }
+                    } finally {
+                      setUploadingDocument(false);
+                      setUploadProgress(0);
+                    }
+                  }}
+                >
+                  {uploadingDocument ? "Uploading..." : "Upload document"}
+                </button>
+              </div>
+              {uploadFile && <p className="mt-2 text-xs text-slate-500">Selected file: {uploadFile.name}</p>}
+              {uploadingDocument && (
+                <div className="mt-2" data-testid="upload-progress">
+                  <div className="h-2 w-full rounded bg-slate-100">
+                    <div className="h-2 rounded bg-slate-500 transition-all" style={{ width: `${uploadProgress}%` }} />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">Upload progress: {uploadProgress}%</p>
+                </div>
+              )}
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3" data-testid="processing-queue-panel">
+              <p className="text-xs font-medium text-slate-700">Processing Queue</p>
+              <p className="mt-1 text-xs text-slate-500">
+                OCR and classification run in the background. Refresh status to see latest progress.
+              </p>
+              {jobsLoading && <p className="mt-2 text-xs text-slate-500">Loading processing status…</p>}
+              {!jobsLoading && jobs.length === 0 && <p className="mt-2 text-xs text-slate-500">No processing jobs yet.</p>}
+              <div className="mt-2 space-y-2">
+                {jobs.slice(0, 8).map((job) => (
+                  <div key={job.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                    <p className="font-medium text-slate-700">{job.job_type.replaceAll("_", " ")}</p>
+                    <p className="text-slate-500">Status: {job.status}</p>
+                    {job.progress_message && <p className="text-slate-500">{job.progress_message}</p>}
+                    {job.error_message && <p className="text-amber-700">{job.error_message}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <p className="text-xs font-medium text-slate-700">Workspace Documents</p>
+              {documentsError && (
+                <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">{documentsError}</p>
+              )}
+              {documentsLoading && <p className="mt-2 text-xs text-slate-500">Loading documents…</p>}
+              <div className="mt-2 space-y-2">
+                {documents.map((doc) => (
+                  <article
+                    key={doc.id}
+                    className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
+                    data-testid="document-row"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-medium">{doc.original_filename}</p>
+                      <span className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600">
+                        {toProcessingOutcome(doc.status).replaceAll("_", " ")}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-slate-500">{doc.created_at}</p>
+                    <p className="mt-1 text-slate-500">
+                      Items: {doc.item_count ?? 0} · Provider mode: {doc.provider_mode ?? "mock"}
+                    </p>
+                    {doc.status_reason && (
+                      <p className="mt-1 text-slate-500">{doc.status_reason}</p>
+                    )}
+                    {doc.status === "duplicate_detected" && (
+                      <p className="mt-1 text-amber-700">Duplicate detected. Keep or remove one copy during document cleanup.</p>
+                    )}
+                    {doc.status === "needs_review" && (
+                      <p className="mt-1 text-amber-700">
+                        Needs manual review. OCR/classification did not produce a complete item set for this document.
+                      </p>
+                    )}
+                    {toProcessingOutcome(doc.status) === "failed" && (
+                      <div className="mt-1">
+                        <p className="text-amber-700">Processing could not complete for this file.</p>
+                        {doc.retryable ? (
+                          <button
+                            type="button"
+                            className="mt-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                            onClick={() => setMessage(`Try again: choose ${doc.original_filename} and upload once more.`)}
+                          >
+                            Try again
+                          </button>
+                        ) : (
+                          <p className="mt-1 text-slate-500">This file needs manual review. Re-upload may not change the outcome.</p>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                ))}
+                {!documentsLoading && documents.length === 0 && (
+                  <p className="text-xs text-slate-500" data-testid="documents-empty-state">
+                    No documents yet. Upload your first document to begin OCR and item extraction.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {activeNav === "Review Items" && (
           <div className="space-y-3" data-testid="review-items-panel">
+            <article className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+              <p className="font-medium text-slate-700">Human Review Guidance</p>
+              <p className="mt-1">Start with Needs Review, then Tax Agent Review, then confirm or exclude the remaining items.</p>
+            </article>
             <div className="flex flex-wrap gap-2" data-testid="review-filters">
               {[
                 { key: "all", label: "All" },
@@ -563,6 +906,11 @@ export function WorkspaceApp() {
               ))}
             </div>
             <div className="space-y-2">
+              {reviewSummary && (
+                <p className="text-xs text-slate-500">
+                  {reviewSummary.confirmed} confirmed · {reviewSummary.needs_review} need review · {reviewSummary.excluded} excluded · {reviewSummary.tax_agent_review} tax agent review
+                </p>
+              )}
               {reviewItems.map((item) => (
                 <article key={item.id} className="rounded-lg border border-slate-200 p-3" data-testid="review-item-row">
                   <div className="flex items-center justify-between gap-2">
@@ -572,23 +920,60 @@ export function WorkspaceApp() {
                     </span>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2" data-testid="item-status-actions">
-                    <StatusActionButton onClick={() => void setItemStatus(item.id, "confirmed")}>Confirm</StatusActionButton>
-                    <StatusActionButton onClick={() => void setItemStatus(item.id, "needs_review")}>Needs Review</StatusActionButton>
-                    <StatusActionButton onClick={() => void setItemStatus(item.id, "excluded")}>Exclude</StatusActionButton>
-                    <StatusActionButton onClick={() => void setItemStatus(item.id, "tax_agent_review")}>Tax Agent Review</StatusActionButton>
+                    {item.review_status !== "confirmed" && (
+                      <StatusActionButton onClick={() => void setItemStatus(item.id, "confirmed")}>Confirm</StatusActionButton>
+                    )}
+                    {item.review_status !== "needs_review" && (
+                      <StatusActionButton onClick={() => void setItemStatus(item.id, "needs_review")}>Needs Review</StatusActionButton>
+                    )}
+                    {item.review_status !== "excluded" && (
+                      <StatusActionButton onClick={() => void setItemStatus(item.id, "excluded")}>Exclude</StatusActionButton>
+                    )}
+                    {item.review_status !== "tax_agent_review" && (
+                      <StatusActionButton onClick={() => void setItemStatus(item.id, "tax_agent_review")}>Tax Agent Review</StatusActionButton>
+                    )}
                   </div>
                 </article>
               ))}
-              {reviewItems.length === 0 && <p className="text-xs text-slate-500">No items for this filter yet.</p>}
+              {reviewItems.length === 0 && (
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  <p>No items for this filter yet.</p>
+                  {(reviewSummary?.total_items ?? 0) === 0 && hasAnyDocuments && (
+                    <p className="mt-1">Documents exist but no items were extracted yet. Open Documents to review processing outcomes.</p>
+                  )}
+                  {(reviewSummary?.total_items ?? 0) === 0 && !hasAnyDocuments && (
+                    <p className="mt-1">Upload a document first, then return to review extracted items.</p>
+                  )}
+                  {hasMockOrManualProvider && (
+                    <p className="mt-1">Manual review mode is active for this workspace. You can still continue by reviewing document outcomes.</p>
+                  )}
+                  <button
+                    type="button"
+                    className="mt-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                    onClick={() => setActiveNav("Documents")}
+                  >
+                    Go to Documents
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
 
         {activeNav === "Issues" && (
           <div className="space-y-2 text-sm text-slate-600" data-testid="issues-placeholder">
-            <p>No dedicated issue engine yet.</p>
-            <p>Items marked Tax Agent Review will appear here.</p>
-            <p>Current tax agent review count: {reviewSummary?.tax_agent_review ?? 0}</p>
+            {(reviewSummary?.tax_agent_review ?? 0) > 0 ? (
+              <>
+                <p>Items marked Tax Agent Review need attention.</p>
+                <p>Current tax agent review count: {reviewSummary?.tax_agent_review ?? 0}</p>
+                <p>Issue engine is not fully configured yet, so this list is a guided placeholder.</p>
+              </>
+            ) : (
+              <>
+                <p>No issues found in the current review status.</p>
+                <p>Issue engine is not configured yet; advanced checks will appear here in a later phase.</p>
+              </>
+            )}
           </div>
         )}
 
@@ -604,7 +989,9 @@ export function WorkspaceApp() {
                     <li key={r}>{r}</li>
                   ))}
                 </ul>
-              ) : null)}
+              ) : (
+                <p className="text-xs text-slate-500">Export is disabled until review items are confirmed or excluded.</p>
+              ))}
             {reviewSummary?.ready_for_export && (
               <div className="mt-3 space-y-2 rounded-lg border border-slate-200 p-3">
                 <p className="text-xs text-slate-700">Generate Encrypted Review Pack</p>
@@ -745,12 +1132,6 @@ export function WorkspaceApp() {
           </div>
         )}
 
-        {activeNav !== "Dashboard" && activeNav !== "Review Items" && activeNav !== "Issues" && activeNav !== "Review Pack" && activeNav !== "Settings" && (
-          <div className="space-y-3 text-sm text-slate-600">
-            <p>{activeNav} section shell is active. Existing workflow remains available while route protection is phased in.</p>
-            <LinkButton href={workspacePath("documents")}>Go to current workflow</LinkButton>
-          </div>
-        )}
       </section>
 
       <aside className="col-span-12 rounded-xl border border-slate-200 bg-white p-4 md:col-span-3">
@@ -836,11 +1217,15 @@ function GuidedStep({
   );
 }
 
-function LinkButton({ href, children }: { href: string; children: React.ReactNode }) {
+function NavActionButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
   return (
-    <Link href={href} className="inline-flex rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50">
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+    >
       {children}
-    </Link>
+    </button>
   );
 }
 

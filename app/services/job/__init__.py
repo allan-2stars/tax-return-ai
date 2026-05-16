@@ -162,6 +162,13 @@ async def run_job_sync(
 
     try:
         result = await job_fn()
+        repo = JobRepository(db)
+        current = await repo.get(job_id)
+        # Some pipelines manage terminal status/messages directly to report
+        # nuanced outcomes (e.g., needs-review with zero extracted items).
+        # Preserve that status instead of overwriting with generic "Completed".
+        if current and current.status in {"succeeded", "failed", "cancelled", "retrying"}:
+            return _job_to_dict(current)
         summary = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
         return await update_job_status(
             db, job_id, "succeeded",

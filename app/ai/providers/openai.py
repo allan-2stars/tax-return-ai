@@ -7,7 +7,12 @@ Falls back to a basic classification dict if the API response is unparseable.
 Keep the openai SDK import inside this file only — never import it in services.
 """
 
-from app.ai.providers.base import AIProvider, ClassificationResult
+from app.ai.providers.base import (
+    AIProvider,
+    ClassificationResult,
+    AIProviderConfigurationError,
+    AIProviderError,
+)
 from app.ai.providers.shared import (
     CLASSIFICATION_SYSTEM_PROMPT,
     _build_classify_prompt,
@@ -99,6 +104,8 @@ class OpenAIProvider(AIProvider):
         financial_year: str,
         skill_context: str = "",
     ) -> list[ClassificationResult]:
+        if not self.api_key:
+            raise AIProviderConfigurationError("OpenAI API key is missing.")
         try:
             from openai import AsyncOpenAI
 
@@ -158,23 +165,10 @@ class OpenAIProvider(AIProvider):
             })]
 
         except Exception as e:
-            return [ClassificationResult({
-                "document_id": document_id,
-                "financial_year": financial_year,
-                "item_type": "needs_review",
-                "category": "needs_review",
-                "amount": None,
-                "currency": "AUD",
-                "description": f"OpenAI API error: {e}",
-                "confidence": 0.0,
-                "needs_review": True,
-                "review_reason": f"API call failed: {e}",
-                "ato_reference_hint": None,
-                "metadata": {
-                    "provider": "openai",
-                    "error": str(e),
-                },
-            })]
+            msg = str(e).lower()
+            if any(k in msg for k in ["authentication", "api key", "unauthorized", "invalid_api_key"]):
+                raise AIProviderConfigurationError("OpenAI API credentials are invalid or missing.") from e
+            raise AIProviderError(f"OpenAI provider failure: {e}") from e
 
     async def health_check(self) -> bool:
         """Check if the OpenAI API is reachable."""
