@@ -781,6 +781,82 @@ describe('WorkspaceApp API-backed states', () => {
     apiMock.listWorkspaceItems.mockResolvedValue([]);
     render(<WorkspaceApp />);
     fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
+    expect(await screen.findByTestId('review-pack-blockers')).toBeInTheDocument();
     expect(await screen.findByText('2 item(s) still need review.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Go to Review Items' })).toBeInTheDocument();
+  });
+
+  it('ready state explains encrypted review pack contents', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.listWorkspaceDocuments.mockResolvedValue([
+      {
+        id: 'd1',
+        session_id: 's1',
+        original_filename: 'receipt.pdf',
+        mime_type: 'application/pdf',
+        file_size_bytes: 100,
+        file_hash: null,
+        category: null,
+        financial_year: 'FY2025',
+        status: 'classified',
+        status_reason: null,
+        provider_mode: 'cloud',
+        item_count: 2,
+        retryable: false,
+        created_at: '2026-05-16T00:00:00Z',
+      },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 2, draft: 0, needs_review: 0, confirmed: 2, excluded: 0, tax_agent_review: 0, ready_for_export: true, blocking_reasons: [],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
+    expect(await screen.findByText('Review summary prepared for human review')).toBeInTheDocument();
+    expect(screen.getByText('Extracted item list for cross-checking')).toBeInTheDocument();
+    expect(screen.getByText('Evidence reference index for supporting documents')).toBeInTheDocument();
+    expect(screen.getByText('This package is prepared for human review, not a final tax return, and not submitted to ATO.')).toBeInTheDocument();
+  });
+
+  it('export history metadata and checksum copy action render', async () => {
+    apiMock.authSetupStatus.mockResolvedValue({ is_configured: true, auth_mode: 'local', has_active_user: true });
+    apiMock.authSession.mockResolvedValue({ is_authenticated: true, app_state: 'UNLOCKED' });
+    apiMock.listWorkspaces.mockResolvedValue([
+      { id: 'w1', user_id: 'u1', tax_year: 'FY2025', label: 'FY2025 Workspace', status: 'active', created_at: '', updated_at: '', last_opened_at: null },
+    ]);
+    apiMock.getWorkspaceReviewSummary.mockResolvedValue({
+      total_items: 1, draft: 0, needs_review: 0, confirmed: 1, excluded: 0, tax_agent_review: 0, ready_for_export: true, blocking_reasons: [],
+    });
+    apiMock.listWorkspaceItems.mockResolvedValue([]);
+    apiMock.listWorkspaceReviewPacks.mockResolvedValue([
+      {
+        id: 'e1',
+        workspace_id: 'w1',
+        filename: 'tax-review-pack-e1.enc.zip',
+        status: 'ready',
+        format: 'enc_zip_v1',
+        encrypted: true,
+        kdf: 'pbkdf2_sha256_600k',
+        encryption_version: '1.0',
+        kdf_params_summary: '{"iterations":600000}',
+        created_at: '2026-01-01T00:00:00Z',
+        downloaded_at: '2026-01-02T00:00:00Z',
+        file_size: 100,
+        sha256: 'abcdef1234567890',
+        item_count: 1,
+        document_count: 1,
+        blocking_reasons: '[]',
+      },
+    ]);
+    render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review Pack' }));
+    expect(await screen.findByText('tax-review-pack-e1.enc.zip')).toBeInTheDocument();
+    expect(screen.getByText(/100 bytes · sha256 abcdef123456/)).toBeInTheDocument();
+    expect(screen.getByText('Downloaded: 2026-01-02T00:00:00Z')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy checksum' })).toBeInTheDocument();
   });
 });

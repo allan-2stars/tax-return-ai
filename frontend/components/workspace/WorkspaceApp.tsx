@@ -980,21 +980,59 @@ export function WorkspaceApp() {
         {activeNav === "Review Pack" && (
           <div className="space-y-2 text-sm text-slate-600" data-testid="review-pack-panel">
             <p>Encrypted review pack is {reviewSummary?.ready_for_export ? "ready" : "not ready"}.</p>
-            <p className="text-xs text-slate-500">This export is for human review and evidence handoff, not tax lodgement.</p>
+            <p className="text-xs text-slate-500">
+              This package is prepared for human review, not a final tax return, and not submitted to ATO.
+            </p>
             <p className="text-xs text-slate-500">Verify downloaded file checksum against the SHA-256 listed below.</p>
+            <article className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs" data-testid="review-pack-summary">
+              <p className="font-medium text-slate-700">Current workspace summary</p>
+              <p className="mt-1 text-slate-600">
+                Confirmed items: {reviewSummary?.confirmed ?? 0} · Excluded items: {reviewSummary?.excluded ?? 0} · Tax Agent Review items: {reviewSummary?.tax_agent_review ?? 0}
+              </p>
+              <p className="text-slate-600">
+                Documents referenced: {documents.filter((d) => (d.item_count ?? 0) > 0).length} of {documents.length}
+              </p>
+            </article>
             {!reviewSummary?.ready_for_export &&
-              (reviewSummary?.blocking_reasons?.length ? (
-                <ul className="list-disc pl-5 text-xs text-slate-500">
-                  {reviewSummary.blocking_reasons.map((r) => (
-                    <li key={r}>{r}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-xs text-slate-500">Export is disabled until review items are confirmed or excluded.</p>
-              ))}
+              (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs" data-testid="review-pack-blockers">
+                  <p className="font-medium text-amber-900">Export is blocked</p>
+                  {reviewSummary?.blocking_reasons?.length ? (
+                    <ul className="mt-1 list-disc pl-5 text-amber-800">
+                      {reviewSummary.blocking_reasons.map((r) => (
+                        <li key={r}>{r}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-1 text-amber-800">Export is disabled until review items are confirmed or excluded.</p>
+                  )}
+                  <p className="mt-2 text-amber-900">Next step: resolve review items, then re-check this page.</p>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700"
+                      onClick={() => setActiveNav("Review Items")}
+                    >
+                      Go to Review Items
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700"
+                      onClick={() => setActiveNav("Documents")}
+                    >
+                      Go to Documents
+                    </button>
+                  </div>
+                </div>
+              )}
             {reviewSummary?.ready_for_export && (
               <div className="mt-3 space-y-2 rounded-lg border border-slate-200 p-3">
                 <p className="text-xs text-slate-700">Generate Encrypted Review Pack</p>
+                <ul className="list-disc pl-5 text-xs text-slate-600">
+                  <li>Review summary prepared for human review</li>
+                  <li>Extracted item list for cross-checking</li>
+                  <li>Evidence reference index for supporting documents</li>
+                </ul>
                 <p className="text-xs text-amber-700">
                   This password is required to open the encrypted review pack. It cannot be recovered.
                 </p>
