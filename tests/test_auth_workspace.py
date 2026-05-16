@@ -21,6 +21,12 @@ async def test_setup_first_user_success(async_client):
     assert data['app_state'] == 'UNLOCKED'
 
 
+async def test_setup_rejects_weak_password(async_client):
+    weak = await async_client.post('/api/auth/setup', json={'master_password': '123456789012'})
+    assert weak.status_code == 409
+    assert "numbers only" in weak.json()["detail"].lower()
+
+
 async def test_second_setup_blocked(async_client):
     first = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
     assert first.status_code == 200
@@ -103,6 +109,18 @@ async def test_recovery_reset_preserves_access(async_client, db_session):
     assert old_unlock.status_code == 401
     new_unlock = await async_client.post('/api/auth/unlock', json={'master_password': 'newsecure123'})
     assert new_unlock.status_code == 200
+
+
+async def test_recovery_reset_rejects_letters_only_password(async_client):
+    setup = await async_client.post('/api/auth/setup', json={'master_password': 'supersecure123'})
+    assert setup.status_code == 200
+    recovery_key = setup.json()['recovery_key']
+    reset = await async_client.post(
+        '/api/auth/recover-reset',
+        json={'recovery_key': recovery_key, 'new_master_password': 'lettersonlyabc'},
+    )
+    assert reset.status_code == 400
+    assert "letters only" in reset.json()["detail"].lower()
 
 
 async def test_logout_clears_cached_key(async_client):

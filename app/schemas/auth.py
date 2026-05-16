@@ -8,7 +8,7 @@ class SetupStatusResponse(BaseModel):
 
 
 class SetupRequest(BaseModel):
-    master_password: str = Field(min_length=8)
+    master_password: str = Field(min_length=12)
     display_name: str | None = None
     email: str | None = None
 
@@ -19,7 +19,7 @@ class UnlockRequest(BaseModel):
 
 class RecoveryResetRequest(BaseModel):
     recovery_key: str
-    new_master_password: str = Field(min_length=8)
+    new_master_password: str = Field(min_length=12)
 
 
 class SessionResponse(BaseModel):

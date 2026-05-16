@@ -308,6 +308,7 @@ describe('WorkspaceApp API-backed states', () => {
       { id: 'a1', entity_type: 'export_package', entity_id: 'e1', action: 'review_pack_downloaded', changed_by: 'user', details: null, created_at: '2026-05-15T00:00:00Z' },
     ]);
     render(<WorkspaceApp />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand' }));
     expect(await screen.findByTestId('audit-events-panel')).toBeInTheDocument();
     expect(screen.getByText('review pack downloaded')).toBeInTheDocument();
   });
@@ -346,7 +347,7 @@ describe('WorkspaceApp API-backed states', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Documents' }));
     expect(await screen.findByTestId('documents-panel')).toBeInTheDocument();
     expect(screen.getByTestId('documents-empty-state')).toHaveTextContent(
-      'No documents yet. Upload your first document to begin OCR and item extraction.'
+      'No documents yet. Upload your first document to begin.'
     );
     expect(screen.queryByRole('button', { name: 'Go to current workflow' })).toBeNull();
   });
@@ -674,7 +675,7 @@ describe('WorkspaceApp API-backed states', () => {
     const pdfFile = new File(['%PDF-1.4'], 'dup.pdf', { type: 'application/pdf' });
     fireEvent.change(input, { target: { files: [pdfFile] } });
     fireEvent.click(screen.getByRole('button', { name: 'Upload document' }));
-    expect(await screen.findByText('Duplicate file detected. Review the document list and keep only the version you need.')).toBeInTheDocument();
+    expect(await screen.findByText('Duplicate file detected. Review and remove the duplicate copy if needed.')).toBeInTheDocument();
   });
 
   it('shows helpful review-items empty message when documents exist but no items extracted', async () => {

@@ -25,6 +25,17 @@ const AUTH_EVENT_KEY = "taxai_auth_event";
 const LOCK_MESSAGE = "Workspace is locked. Unlock to view sensitive tax data.";
 const ALLOWED_UPLOAD_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".csv", ".txt"];
 const ALLOWED_UPLOAD_MIME_TYPES = ["application/pdf", "image/png", "image/jpeg", "text/csv", "text/plain"];
+const COMMON_WEAK_PASSWORDS = new Set([
+  "password",
+  "password123",
+  "123456789012",
+  "1234567890",
+  "qwerty123",
+  "letmein123",
+  "admin123456",
+  "welcome123",
+  "changeme123",
+]);
 
 function isLockedResponseError(err: unknown): boolean {
   if (err instanceof ApiError) return err.status === 401 || err.status === 423;
@@ -42,6 +53,23 @@ function toProcessingOutcome(status: string): "uploaded" | "extracting" | "class
   return "uploaded";
 }
 
+function validateMasterPassword(password: string): string | null {
+  const normalized = password.trim();
+  if (normalized.length < 12) return "Use at least 12 characters.";
+  if (/^\d+$/.test(normalized)) return "Password cannot be numbers only.";
+  if (/^[A-Za-z]+$/.test(normalized)) return "Password cannot be letters only.";
+  if (COMMON_WEAK_PASSWORDS.has(normalized.toLowerCase())) return "This password is too common. Choose a stronger password.";
+  return null;
+}
+
+function inferItemNature(item: TaxItem): "income/earning" | "expense/cost" | "unknown" {
+  const t = (item.item_type || "").toLowerCase();
+  const c = (item.category || "").toLowerCase();
+  if (t.includes("income") || c.includes("salary") || c.includes("wages")) return "income/earning";
+  if (t.includes("deduction") || t.includes("expense") || c.includes("expense") || c.includes("cost") || c.includes("tools")) return "expense/cost";
+  return "unknown";
+}
+
 export function WorkspaceApp() {
   const [authState, setAuthState] = useState<AppAuthState>("UNLOCKING");
   const [setupStep, setSetupStep] = useState<"create" | "show_key" | "confirm_key">("create");
@@ -53,6 +81,7 @@ export function WorkspaceApp() {
   const [confirmInput, setConfirmInput] = useState("");
   const [recoveryKey, setRecoveryKey] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [activeNav, setActiveNav] = useState<NavItem>("Dashboard");
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -76,11 +105,27 @@ export function WorkspaceApp() {
   const [securityStatus, setSecurityStatus] = useState<WorkspaceSecurityStatus | null>(null);
   const [recoveryCopied, setRecoveryCopied] = useState(false);
   const [resetSuccessMessage, setResetSuccessMessage] = useState<string | null>(null);
+  const [queueCollapsed, setQueueCollapsed] = useState(true);
+  const [documentsCollapsed, setDocumentsCollapsed] = useState(false);
+  const [showAllJobs, setShowAllJobs] = useState(false);
+  const [showAllDocuments, setShowAllDocuments] = useState(false);
+  const [activityCollapsed, setActivityCollapsed] = useState(true);
+  const [showAllActivity, setShowAllActivity] = useState(false);
+  const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useState<number>(() => {
+    if (typeof window === "undefined") return 15;
+    return Number(window.localStorage.getItem("taxai_idle_timeout_minutes") || 15);
+  });
+  const [selectedItem, setSelectedItem] = useState<TaxItem | null>(null);
 
   const isAllowedUploadFile = (file: File): boolean => {
     const ext = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
     const type = (file.type || "").toLowerCase();
     return ALLOWED_UPLOAD_EXTENSIONS.includes(ext) || ALLOWED_UPLOAD_MIME_TYPES.includes(type);
+  };
+
+  const showToast = (text: string) => {
+    setToast(text);
+    window.setTimeout(() => setToast(null), 2800);
   };
 
   const refreshReviewData = async (workspaceId: string, filter: ReviewFilter) => {
@@ -248,6 +293,10 @@ export function WorkspaceApp() {
   }, [authState, selectedWorkspaceId]);
 
   useEffect(() => {
+    setToast(null);
+  }, [activeNav]);
+
+  useEffect(() => {
     if (authState !== "UNLOCKED" || !selectedWorkspaceId) return;
     void (async () => {
       try {
@@ -383,8 +432,9 @@ export function WorkspaceApp() {
             className="space-y-3"
             onSubmit={async (e) => {
               e.preventDefault();
-              if (password.length < 8) {
-                setMessage("Use at least 8 characters.");
+              const pwdError = validateMasterPassword(password);
+              if (pwdError) {
+                setMessage(pwdError);
                 return;
               }
               try {
@@ -423,6 +473,7 @@ export function WorkspaceApp() {
                 onClick={async () => {
                   await navigator.clipboard.writeText(recoveryKey);
                   setRecoveryCopied(true);
+                  showToast("Recovery key copied.");
                 }}
               >
                 Copy Key
@@ -521,6 +572,11 @@ export function WorkspaceApp() {
             className="space-y-3"
             onSubmit={async (e) => {
               e.preventDefault();
+              const pwdError = validateMasterPassword(recoveryResetPassword);
+              if (pwdError) {
+                setMessage(pwdError);
+                return;
+              }
               try {
                 const session = await api.authRecoverReset({
                   recovery_key: recoveryResetKey,
@@ -631,6 +687,11 @@ export function WorkspaceApp() {
         {message && (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             {message}
+          </div>
+        )}
+        {toast && (
+          <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800" data-testid="toast-notification">
+            {toast}
           </div>
         )}
         {resetSuccessMessage && (
@@ -761,9 +822,9 @@ export function WorkspaceApp() {
                       const duplicateDoc = refreshedDocs.find((d) => d.status === "duplicate_detected");
                       setUploadFile(null);
                       if (duplicateDoc) {
-                        setMessage("Duplicate file detected. Review the document list and keep only the version you need.");
+                        showToast("Duplicate file detected. Review and remove the duplicate copy if needed.");
                       } else {
-                        setMessage(`${uploadedFileName} uploaded. Processing has started.`);
+                        showToast(`${uploadedFileName} uploaded. Processing has started.`);
                       }
                     } catch (err) {
                       if (isLockedResponseError(err)) {
@@ -803,31 +864,63 @@ export function WorkspaceApp() {
               )}
             </div>
             <div className="rounded-lg border border-slate-200 p-3" data-testid="processing-queue-panel">
-              <p className="text-xs font-medium text-slate-700">Processing Queue</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-slate-700">Processing Queue</p>
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
+                  onClick={() => setQueueCollapsed((v) => !v)}
+                >
+                  {queueCollapsed ? "Expand" : "Collapse"}
+                </button>
+              </div>
               <p className="mt-1 text-xs text-slate-500">
                 OCR and classification run in the background. Refresh status to see latest progress.
               </p>
-              {jobsLoading && <p className="mt-2 text-xs text-slate-500">Loading processing status…</p>}
-              {!jobsLoading && jobs.length === 0 && <p className="mt-2 text-xs text-slate-500">No processing jobs yet.</p>}
+              {!queueCollapsed && jobsLoading && <p className="mt-2 text-xs text-slate-500">Loading processing status…</p>}
+              {!queueCollapsed && !jobsLoading && jobs.length === 0 && <p className="mt-2 text-xs text-slate-500">No processing jobs yet.</p>}
+              {!queueCollapsed && (
               <div className="mt-2 space-y-2">
-                {jobs.slice(0, 8).map((job) => (
+                {(showAllJobs ? jobs : jobs.slice(0, 4)).map((job) => (
                   <div key={job.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
                     <p className="font-medium text-slate-700">{job.job_type.replaceAll("_", " ")}</p>
-                    <p className="text-slate-500">Status: {job.status}</p>
+                    <p className="text-slate-500">
+                      Status: <span className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700">{job.status}</span>
+                    </p>
                     {job.progress_message && <p className="text-slate-500">{job.progress_message}</p>}
                     {job.error_message && <p className="text-amber-700">{job.error_message}</p>}
                   </div>
                 ))}
+                {jobs.length > 4 && (
+                  <button
+                    type="button"
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                    onClick={() => setShowAllJobs((v) => !v)}
+                  >
+                    {showAllJobs ? "Show less" : `Show more (${jobs.length - 4})`}
+                  </button>
+                )}
               </div>
+              )}
             </div>
             <div className="rounded-lg border border-slate-200 p-3">
-              <p className="text-xs font-medium text-slate-700">Workspace Documents</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-slate-700">Workspace Documents</p>
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
+                  onClick={() => setDocumentsCollapsed((v) => !v)}
+                >
+                  {documentsCollapsed ? "Expand" : "Collapse"}
+                </button>
+              </div>
               {documentsError && (
                 <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">{documentsError}</p>
               )}
-              {documentsLoading && <p className="mt-2 text-xs text-slate-500">Loading documents…</p>}
+              {!documentsCollapsed && documentsLoading && <p className="mt-2 text-xs text-slate-500">Loading documents…</p>}
+              {!documentsCollapsed && (
               <div className="mt-2 space-y-2">
-                {documents.map((doc) => (
+                {(showAllDocuments ? documents : documents.slice(0, 5)).map((doc) => (
                   <article
                     key={doc.id}
                     className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
@@ -847,7 +940,25 @@ export function WorkspaceApp() {
                       <p className="mt-1 text-slate-500">{doc.status_reason}</p>
                     )}
                     {doc.status === "duplicate_detected" && (
-                      <p className="mt-1 text-amber-700">Duplicate detected. Keep or remove one copy during document cleanup.</p>
+                      <div className="mt-1">
+                        <p className="text-amber-700">Duplicate detected. The original document is kept.</p>
+                        <div className="mt-1 flex gap-2">
+                          <span className="rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">Duplicate</span>
+                          <button
+                            type="button"
+                            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                            onClick={async () => {
+                              const confirmed = window.confirm(`Remove duplicate document "${doc.original_filename}"? The original document will be kept.`);
+                              if (!confirmed) return;
+                              await api.deleteWorkspaceDocument(doc.id);
+                              await refreshDocumentsAndJobs();
+                              showToast("Duplicate document removed.");
+                            }}
+                          >
+                            Review duplicate
+                          </button>
+                        </div>
+                      </div>
                     )}
                     {doc.status === "needs_review" && (
                       <p className="mt-1 text-amber-700">
@@ -872,12 +983,22 @@ export function WorkspaceApp() {
                     )}
                   </article>
                 ))}
+                {documents.length > 5 && (
+                  <button
+                    type="button"
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                    onClick={() => setShowAllDocuments((v) => !v)}
+                  >
+                    {showAllDocuments ? "Show less" : `Show more (${documents.length - 5})`}
+                  </button>
+                )}
                 {!documentsLoading && documents.length === 0 && (
                   <p className="text-xs text-slate-500" data-testid="documents-empty-state">
-                    No documents yet. Upload your first document to begin OCR and item extraction.
+                    No documents yet. Upload your first document to begin.
                   </p>
                 )}
               </div>
+              )}
             </div>
           </div>
         )}
@@ -887,6 +1008,12 @@ export function WorkspaceApp() {
             <article className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
               <p className="font-medium text-slate-700">Human Review Guidance</p>
               <p className="mt-1">Start with Needs Review, then Tax Agent Review, then confirm or exclude the remaining items.</p>
+              <ul className="mt-2 list-disc pl-5">
+                <li>Confirmed = user reviewed and accepts this item for review pack.</li>
+                <li>Needs Review = user still needs to check details.</li>
+                <li>Excluded = do not include in review pack.</li>
+                <li>Tax Agent Review = include as a question for professional review.</li>
+              </ul>
             </article>
             <div className="flex flex-wrap gap-2" data-testid="review-filters">
               {[
@@ -914,12 +1041,16 @@ export function WorkspaceApp() {
               {reviewItems.map((item) => (
                 <article key={item.id} className="rounded-lg border border-slate-200 p-3" data-testid="review-item-row">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm text-slate-700">{item.description || item.category}</p>
+                    <div>
+                      <p className="text-sm text-slate-700">{item.description || item.category}</p>
+                      <p className="text-[11px] text-slate-500">Type: {inferItemNature(item)}</p>
+                    </div>
                     <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-600">
                       {item.review_status.replaceAll("_", " ")}
                     </span>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2" data-testid="item-status-actions">
+                    <StatusActionButton onClick={() => setSelectedItem(item)}>View details</StatusActionButton>
                     {item.review_status !== "confirmed" && (
                       <StatusActionButton onClick={() => void setItemStatus(item.id, "confirmed")}>Confirm</StatusActionButton>
                     )}
@@ -957,6 +1088,27 @@ export function WorkspaceApp() {
                 </div>
               )}
             </div>
+            {selectedItem && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 p-4">
+                <div className="w-full max-w-xl rounded-lg border border-slate-200 bg-white p-4 text-xs text-slate-700">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold">Review Item Details</h4>
+                    <button className="rounded border border-slate-300 px-2 py-1" onClick={() => setSelectedItem(null)}>Close</button>
+                  </div>
+                  <div className="mt-3 space-y-1">
+                    <p><span className="font-medium">Provider/Seller:</span> Not extracted yet</p>
+                    <p><span className="font-medium">Description:</span> {selectedItem.description || "Not extracted yet"}</p>
+                    <p><span className="font-medium">Amount:</span> {selectedItem.amount ?? "Not extracted yet"}</p>
+                    <p><span className="font-medium">Category:</span> {selectedItem.category || "Not extracted yet"}</p>
+                    <p><span className="font-medium">Inferred type:</span> {inferItemNature(selectedItem)}</p>
+                    <p><span className="font-medium">Source document:</span> {documents.find((d) => d.session_id === selectedItem.session_id)?.original_filename ?? "Not extracted yet"}</p>
+                    <p><span className="font-medium">Confidence:</span> {selectedItem.confidence ?? "Not extracted yet"}</p>
+                    <p><span className="font-medium">Evidence snippets:</span> Not extracted yet</p>
+                    <p><span className="font-medium">Reviewer notes:</span> {selectedItem.review_reason || "Not extracted yet"}</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1063,7 +1215,7 @@ export function WorkspaceApp() {
                   className="rounded-md border border-slate-300 bg-slate-900 px-3 py-1 text-xs text-white disabled:opacity-50"
                   disabled={
                     !selectedWorkspaceId ||
-                    exportPassword.length < 8 ||
+                    exportPassword.length < 12 ||
                     exportPassword !== confirmExportPassword
                   }
                   onClick={async () => {
@@ -1101,7 +1253,7 @@ export function WorkspaceApp() {
                         className="mt-1 rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
                         onClick={async () => {
                           await navigator.clipboard.writeText(e.sha256 ?? "");
-                          setMessage("Checksum copied for local verification.");
+                          showToast("Checksum copied for local verification.");
                         }}
                       >
                         Copy checksum
@@ -1138,6 +1290,32 @@ export function WorkspaceApp() {
         {activeNav === "Settings" && (
           <div className="space-y-3" data-testid="security-settings-panel">
             <h3 className="text-sm font-semibold text-slate-800">Security Status</h3>
+            <article className="rounded-lg border border-slate-200 p-3 text-xs text-slate-600">
+              <p className="font-semibold text-slate-700">Session idle timeout</p>
+              <p className="mt-1">Choose how long the workspace stays unlocked when inactive.</p>
+              <div className="mt-2 flex items-center gap-2">
+                <select
+                  value={idleTimeoutMinutes}
+                  onChange={(e) => setIdleTimeoutMinutes(Number(e.target.value))}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs"
+                >
+                  <option value={5}>5 minutes</option>
+                  <option value={15}>15 minutes</option>
+                  <option value={30}>30 minutes</option>
+                  <option value={60}>60 minutes</option>
+                </select>
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                  onClick={() => {
+                    localStorage.setItem("taxai_idle_timeout_minutes", String(idleTimeoutMinutes));
+                    showToast("Session timeout preference saved.");
+                  }}
+                >
+                  Save
+                </button>
+              </div>
+            </article>
             {!securityStatus && <p className="text-xs text-slate-500">Security status unavailable.</p>}
             {securityStatus && (
               <>
@@ -1189,24 +1367,44 @@ export function WorkspaceApp() {
           >
             Lock workspace
           </button>
-          <button
-            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs"
-            onClick={() => setAuthState("SESSION_EXPIRED")}
-          >
-            Simulate session expiry
-          </button>
+          {process.env.NEXT_PUBLIC_ENABLE_DEV_SESSION_SIMULATOR === "true" && (
+            <button
+              className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs"
+              onClick={() => setAuthState("SESSION_EXPIRED")}
+            >
+              Simulate session expiry
+            </button>
+          )}
         </div>
         <div className="mt-4">
-          <h4 className="text-xs font-semibold text-slate-700">Recent Activity</h4>
-          <div className="mt-2 space-y-2" data-testid="audit-events-panel">
-            {auditEvents.slice(0, 8).map((event) => (
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold text-slate-700">Recent Activity</h4>
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
+              onClick={() => setActivityCollapsed((v) => !v)}
+            >
+              {activityCollapsed ? "Expand" : "Collapse"}
+            </button>
+          </div>
+          {!activityCollapsed && <div className="mt-2 space-y-2" data-testid="audit-events-panel">
+            {(showAllActivity ? auditEvents : auditEvents.slice(0, 5)).map((event) => (
               <div key={event.id} className="rounded-md border border-slate-200 p-2 text-[11px] text-slate-600">
                 <p className="font-medium text-slate-700">{event.action.replaceAll("_", " ")}</p>
                 <p className="text-slate-500">{event.created_at}</p>
               </div>
             ))}
+            {auditEvents.length > 5 && (
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
+                onClick={() => setShowAllActivity((v) => !v)}
+              >
+                {showAllActivity ? "Show less" : `Show more (${auditEvents.length - 5})`}
+              </button>
+            )}
             {auditEvents.length === 0 && <p className="text-[11px] text-slate-500">No recent audit events.</p>}
-          </div>
+          </div>}
         </div>
       </aside>
     </div>

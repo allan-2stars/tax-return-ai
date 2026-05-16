@@ -534,6 +534,8 @@ export const api = {
     ),
   listWorkspaceDocuments: (workspaceId: string) =>
     request<Document[]>(`/api/workspaces/${workspaceId}/documents`),
+  deleteWorkspaceDocument: (documentId: string) =>
+    request<void>(`/api/documents/${documentId}`, { method: "DELETE" }),
   uploadWorkspaceDocument: (
     workspaceId: string,
     file: File,

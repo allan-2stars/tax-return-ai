@@ -24,6 +24,17 @@ from app.services.security.unlock_capability import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 COOKIE_NAME = "taxai_session"
+COMMON_WEAK_PASSWORDS = {
+    "password",
+    "password123",
+    "123456789012",
+    "1234567890",
+    "qwerty123",
+    "letmein123",
+    "admin123456",
+    "welcome123",
+    "changeme123",
+}
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -39,6 +50,20 @@ def _b64(data: bytes) -> str:
 
 def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def validate_master_password(password: str) -> str | None:
+    """Return validation error string, or None when valid."""
+    normalized = (password or "").strip()
+    if len(normalized) < 12:
+        return "Master password must be at least 12 characters."
+    if normalized.isdigit():
+        return "Master password cannot be numbers only."
+    if normalized.isalpha():
+        return "Master password cannot be letters only."
+    if normalized.lower() in COMMON_WEAK_PASSWORDS:
+        return "Master password is too common. Choose a stronger password."
+    return None
 
 
 def derive_field_encryption_key(master_password: str, password_salt_b64: str, password_kdf: str) -> bytes:
@@ -143,6 +168,10 @@ async def setup_user(
     email: str | None,
     request: Request,
 ) -> tuple[User, str, str, datetime]:
+    pwd_error = validate_master_password(master_password)
+    if pwd_error:
+        raise ValueError(pwd_error)
+
     existing = await get_active_user(db)
     if existing:
         raise ValueError("Local user is already configured")
@@ -254,6 +283,10 @@ async def recovery_reset_password(
     new_master_password: str,
     request: Request,
 ) -> tuple[User, str, datetime]:
+    pwd_error = validate_master_password(new_master_password)
+    if pwd_error:
+        raise ValueError(pwd_error)
+
     user = await get_active_user(db)
     if not user:
         raise ValueError("Local user is not configured")
